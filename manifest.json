@@ -1,10 +1,11 @@
 {
+  "id": "/invoice/",
   "name": "ניהול חשבוניות חודשי",
   "short_name": "חשבוניות",
   "lang": "he",
   "dir": "rtl",
-  "start_url": "./index.html",
-  "scope": "./",
+  "start_url": "/invoice/index.html",
+  "scope": "/invoice/",
   "display": "standalone",
   "background_color": "#f0f2f5",
   "theme_color": "#1877f2",

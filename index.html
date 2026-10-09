@@ -526,8 +526,8 @@
         let db;
         try {
             // מטמון מקומי: אפשר להוסיף מסמכים גם בלי אינטרנט, והם יסונכרנו כשהחיבור חוזר
-            db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
-        } catch (e) { db = getFirestore(app); }
+            db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) }, 'invoices');
+        } catch (e) { db = getFirestore(app, 'invoices'); }
         const storage = getStorage(app);
 
         if (window.pdfjsLib) {
@@ -3481,7 +3481,7 @@
     </script>
     <script>
         // גרסת בנייה: כשהיא משתנה מנקים פעם אחת את ה-service worker והמטמון, כדי שלא יוגש קוד ישן
-        var BUILD_ID = '2026-10-09-merged';
+        var BUILD_ID = '2026-10-09-invoices-db';
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', async function () {
                 try {

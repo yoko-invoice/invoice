@@ -1,5 +1,5 @@
-const CACHE = 'invoices-v5';
-const CORE = ['./', 'index.html', 'app.css', 'app.js', 'ui.js', 'manifest.json'];
+const CACHE = 'invoices-v6';
+const CORE = ['./', 'index.html', 'manifest.json'];
 
 self.addEventListener('install', (e) => {
   self.skipWaiting();

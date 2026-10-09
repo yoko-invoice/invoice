@@ -1,4 +1,515 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+﻿<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ניהול חשבוניות חודשי</title>
+
+    <link rel="manifest" href="manifest.json">
+
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="חשבוניות">
+    <meta name="theme-color" content="#1877f2">
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 8px; background-color: #f0f2f5; color: #1c1e21; overflow-x: hidden; width: 100%; box-sizing: border-box; }
+        h1, h2, h3, h4 { color: #050505; margin-top: 0; text-align: center; }
+        .card { background: white; padding: 12px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 12px; box-sizing: border-box; max-width: 100%; overflow: hidden; }
+        .form-group { margin-bottom: 10px; max-width: 100%; }
+        label { display: block; margin-bottom: 4px; font-weight: 600; font-size: 0.85em; }
+
+        input:not([type="checkbox"]), select, textarea, button {
+            padding: 9px;
+            font-size: 14px;
+            border: 1px solid #ccd0d5;
+            border-radius: 6px;
+            width: 100%;
+            box-sizing: border-box;
+            font-family: inherit;
+        }
+
+        button { background-color: #1877f2; color: white; border: none; font-weight: bold; cursor: pointer; margin-top: 5px; box-sizing: border-box; }
+        button:hover { opacity: 0.9; }
+        button:disabled { opacity: 0.6; cursor: wait; }
+
+        .table-wrapper { overflow-x: auto; width: 100%; max-width: 900px; margin: 0 auto; box-sizing: border-box; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; box-sizing: border-box; }
+        th, td { border: 1px solid #ddd; padding: 6px 4px; text-align: center; vertical-align: middle; box-sizing: border-box; }
+        th { background-color: #34495e; color: white; font-size: 0.8em; padding: 8px 3px; }
+        td { font-size: 0.8em; padding: 6px 3px; }
+
+        .delete-btn { background-color: #ff4d4d; width: auto; padding: 4px 8px; font-size: 0.8em; }
+        .edit-btn { background-color: #f39c12; width: auto; padding: 4px 8px; font-size: 0.8em; margin-left: 4px; }
+        .view-img-btn { background-color: #34495e; width: auto; padding: 4px 8px; font-size: 0.8em; margin-left: 4px; }
+        .pdf-btn { background-color: #e74c3c; }
+        .excel-btn { background-color: #27ae60; }
+        .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
+        .modal-actions button { margin-top: 0; flex: 1; }
+        .hidden { display: none !important; }
+        .restaurant-tag { text-align: center; font-size: 0.8em; color: #555; margin-bottom: 6px; }
+
+        .supplier-manage-item { display: flex; justify-content: space-between; align-items: center; background: #f8f9fa; border: 1px solid #eee; border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; font-size: 0.85em; }
+        #invoiceRecognizing { padding: 10px; background: #eef5ff; border-radius: 8px; margin-top: 8px; text-align: center; }
+        #invoicesPdfContainer table th, #invoicesPdfContainer table td { text-align: right; }
+        #invoiceConfirmForm { border: 1px solid #ddd; border-radius: 8px; padding: 10px; background: #f8f9fa; }
+        #lockedView { text-align: center; padding-top: 60px; }
+
+        .items-list-box { background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 8px; margin-top: 6px; font-size: 0.85em; max-height: 150px; overflow-y: auto; }
+        .search-results-box { background: #eef7ed; border: 1px solid #c3e6cb; border-radius: 6px; padding: 10px; margin-top: 10px; font-size: 0.9em; }
+
+        .credit-badge { color: #d9534f; font-weight: bold; }
+        .credit-row { background-color: #fff5f5; }
+        .supplier-summary-card { background: #fdfefe; border: 1px solid #d6eaf8; border-radius: 8px; padding: 10px; margin-top: 8px; }
+        .api-key-box { background: #fffde7; border: 1px solid #fff59d; padding: 10px; border-radius: 8px; margin-bottom: 12px; }
+        .duplicate-warning { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; padding: 8px; border-radius: 6px; margin-bottom: 8px; font-size: 0.85em; font-weight: bold; text-align: center; }
+        .action-btns-group { display: flex; gap: 8px; margin-top: 14px; }
+        .action-btns-group button { flex: 1; margin-top: 0; }
+        
+        .editable-cell input { border: 1px solid transparent; background: transparent; text-align: center; width: 100%; font-size: inherit; padding: 4px; }
+        .editable-cell input:focus { border: 1px solid #1877f2; background: #fff; border-radius: 4px; outline: none; }
+
+        /* כפתור צילום/העלאה - כפתור גדול אחד עם אייקון, פותח את בורר הקבצים הטבעי
+           של אנדרואיד (שמציע גם מצלמה, גם גלריה וגם קבצים) */
+        .upload-tile {
+            display: flex; flex-direction: row; align-items: center; justify-content: center;
+            gap: 10px; padding: 16px 8px; border-radius: 12px; border: none; cursor: pointer;
+            font-weight: 600; font-size: 0.95em; color: white; margin-top: 6px; width: 100%;
+            background: linear-gradient(135deg, #5dade2, #3498db);
+            box-shadow: 0 2px 6px rgba(0,0,0,0.12); transition: transform 0.1s ease, box-shadow 0.1s ease;
+        }
+        .upload-tile:active { transform: scale(0.98); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+        .upload-tile svg { width: 26px; height: 26px; flex-shrink: 0; }
+
+
+        /* מודאל מצלמה חיה */
+        #cameraModalOverlay {
+            position: fixed; inset: 0; background: #000; z-index: 9999;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+        }
+        #cameraModalOverlay video { width: 100%; flex: 1 1 auto; min-height: 0; object-fit: contain; background: #000; }
+        #cameraModalControls { display: flex; gap: 10px; width: 100%; max-width: 480px; padding: 12px; box-sizing: border-box; position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); z-index: 2; }
+        #cameraModalControls button { margin-top: 0; }
+        #cameraModalError { color: #fff; background: #c0392b; padding: 10px; border-radius: 8px; margin: 12px; text-align: center; font-size: 0.9em; }
+
+        /* מציג תמונה בתוך האפליקציה */
+        #imgViewerOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 10000; display: flex; flex-direction: column; }
+        #imgViewerOverlay .iv-bar { display: flex; justify-content: flex-end; padding: 10px; }
+        #imgViewerOverlay .iv-close { margin: 0; width: auto; padding: 8px 18px; background: #7f8c8d; color: #fff; border: none; border-radius: 8px; font-size: 1em; }
+        #imgViewerOverlay .iv-body { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; text-align: center; }
+        #imgViewerOverlay .iv-body img { max-width: 100%; height: auto; touch-action: pinch-zoom; }
+
+        /* הודעות קופצות ודיאלוגים */
+        #toastBox { position: fixed; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 10002; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; padding: 0 12px; }
+        .toast { pointer-events: auto; max-width: 480px; width: 100%; background: #2c3e50; color: #fff; padding: 12px 14px; border-radius: 10px; font-size: 0.95em; white-space: pre-line; box-shadow: 0 4px 14px rgba(0,0,0,0.3); box-sizing: border-box; animation: toastIn 0.2s ease-out; }
+        .toast.err { background: #c0392b; } .toast.ok { background: #1e8449; }
+        @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+        #dlgOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 10001; display: flex; align-items: center; justify-content: center; padding: 16px; }
+        #dlgOverlay .dlg { background: #fff; border-radius: 12px; padding: 16px; width: 100%; max-width: 400px; box-sizing: border-box; }
+        #dlgOverlay .dlg-msg { white-space: pre-line; line-height: 1.5; margin-bottom: 12px; }
+        #dlgOverlay .dlg-btns { display: flex; gap: 8px; }
+        #dlgOverlay .dlg-btns button { margin-top: 0; flex: 1; }
+        /* גרפים */
+        .ch-bars { display: flex; align-items: flex-end; gap: 6px; height: 130px; margin: 8px 0 4px; }
+        .ch-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; min-width: 0; }
+        .ch-col .bar { width: 100%; background: #1877f2; border-radius: 4px 4px 0 0; min-height: 2px; }
+        .ch-col .bar.neg { background: #c0392b; } .ch-col .bar.cur { background: #27ae60; }
+        .ch-col .val { font-size: 0.65em; color: #555; margin-bottom: 2px; white-space: nowrap; }
+        .ch-labels { display: flex; gap: 6px; } .ch-labels span { flex: 1; text-align: center; font-size: 0.7em; color: #555; }
+        .ch-hrow { margin: 6px 0; font-size: 0.85em; } .ch-hrow .track { background: #eef1f5; border-radius: 6px; height: 14px; overflow: hidden; } .ch-hrow .fill { background: #1877f2; height: 100%; }
+        .ch-spark { border: 1px solid #e3e6ea; border-radius: 8px; padding: 6px; margin: 6px 0; font-size: 0.85em; }
+
+        /* כרטיסים מתקפלים */
+        .card.foldable > h3 { cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 0; user-select: none; -webkit-tap-highlight-color: transparent; }
+        .card.foldable > h3::after { content: '▾'; font-size: 0.9em; transition: transform 0.15s; flex-shrink: 0; }
+        .card.foldable.folded > h3::after { transform: rotate(90deg); }
+        .card.foldable > .card-body { margin-top: 10px; }
+        .card.foldable.folded > .card-body { display: none; }
+        .fold-tools { display: flex; gap: 6px; margin-bottom: 8px; }
+        .fold-tools button { margin-top: 0; padding: 6px 10px; background: #ecf0f1; color: #2c3e50; font-size: 0.85em; font-weight: normal; }
+        /* רשימת ספקים קומפקטית */
+        #supplierListManage { max-height: 220px; overflow-y: auto; }
+        .supplier-manage-item { padding: 2px 8px; margin-bottom: 3px; font-size: 0.92em; }
+        .supplier-manage-item .edit-btn, .supplier-manage-item .delete-btn { padding: 3px 9px; font-size: 0.9em; margin-top: 0; }
+    </style>
+</head>
+<body>
+<div id="imgViewerOverlay" class="hidden">
+    <div class="iv-bar"><button class="iv-close" onclick="closeImageViewer()">✕ סגור</button></div>
+    <div class="iv-body"><img id="imgViewerImg" alt=""></div>
+</div>
+<!-- מודאל מצלמה חיה לצילום תמונה בודדת -->
+    <div id="cameraModalOverlay" class="hidden">
+        <video id="cameraModalVideo" autoplay playsinline muted poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" style="opacity:0; transition:opacity 0.2s;"></video>
+        <div id="cameraModalError" class="hidden"></div>
+        <div id="cameraModalControls">
+            <button onclick="capturePhotoFromCamera()" style="background-color:#27ae60;">📸 צלם</button>
+            <button onclick="closeCameraModal()" style="background-color:#7f8c8d;">ביטול</button>
+        </div>
+    </div>
+    <canvas id="cameraModalCanvas" class="hidden"></canvas>
+
+
+    <div class="restaurant-tag" id="restaurantTag"></div>
+    <h1>מערכת ניהול חשבוניות חודשי</h1>
+
+    <!-- מסך נעילה -->
+    <div class="card" id="lockedView">
+        <h2>הגנת סיסמה למנהל</h2>
+        <button id="bioLoginBtn" class="hidden" onclick="unlockWithBiometric()" style="background-color:#8e44ad; max-width:260px; margin:0 auto 8px;">🔐 כניסה בטביעת אצבע</button>
+        <button onclick="unlockApp()" style="background-color:#27ae60; max-width:260px; margin:0 auto;">כניסה</button>
+    </div>
+
+    <!-- מסך ראשי -->
+    <div class="hidden" id="mainView">
+        
+        <div class="card">
+            <div class="form-group">
+                <label>בחירת חודש:</label>
+                <input type="month" id="invoiceMonthSelect">
+            </div>
+
+            <div class="form-group">
+                <label>צילום / העלאת מסמך:</label>
+                <div style="display:flex; gap:8px;">
+                    <button type="button" class="upload-tile" data-recognition-trigger onclick="openCameraModal()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                        <span>צלם</span>
+                    </button>
+                    <button type="button" class="upload-tile" data-recognition-trigger onclick="document.getElementById('fileUploadInput').click()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        <span>העלה קובץ</span>
+                    </button>
+                </div>
+                <input type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif,.pdf,application/pdf" id="fileUploadInput" class="hidden" multiple>
+                <p style="font-size:0.75em; color:#777; margin:4px 0 0 0;">אפשר לבחור כמה תמונות, או PDF (עד 8 עמודים).</p>
+            </div>
+
+            <div class="hidden" id="invoiceRecognizing">⏳ מעבד את המסמך, אנא המתן...</div>
+
+            <div class="hidden" id="invoiceConfirmForm" style="margin-top:10px;">
+                <h4 id="confirmFormTitle" style="margin-bottom:8px;">אישור ואימות חשבונית</h4>
+                <div id="duplicateWarningBox" class="duplicate-warning hidden">⚠️ אזהרה: נראית חשבונית זו כבר קיימת במערכת!</div>
+                <div id="mismatchWarningBox" class="duplicate-warning hidden" style="background:#fff3cd; border-color:#ffeeba; color:#856404;">⚠️ סכום הפריטים לא תואם לסכום הכולל - בדוק מול החשבונית.</div>
+                <div id="priceAlertBox" class="hidden" style="border-radius:8px; padding:8px; margin-bottom:8px; font-size:0.85em; text-align:right;"></div>
+                <p style="font-size:0.8em; color:#555; margin:0 0 8px 0;"><b>בדוק את הפרטים</b> לפני השמירה (זיהוי AI עלול לטעות):</p>
+                <div id="invoicePreviewImgWrap" style="text-align:center; margin-bottom:10px;"></div>
+                <div id="addPagesRow" class="hidden" style="margin-bottom:10px;">
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" data-recognition-trigger onclick="startAddPageCamera()" style="flex:1; padding:8px; font-size:0.85em; background:#fff; color:#1877f2; border:1px solid #1877f2; border-radius:8px;">📷 הוסף עמוד (צילום)</button>
+                        <button type="button" data-recognition-trigger onclick="document.getElementById('addPageFileInput').click()" style="flex:1; padding:8px; font-size:0.85em; background:#fff; color:#1877f2; border:1px solid #1877f2; border-radius:8px;">📎 הוסף עמוד (קובץ)</button>
+                    </div>
+                    <input type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif,.pdf,application/pdf" id="addPageFileInput" class="hidden" multiple>
+                </div>
+                <div class="form-group" id="docTypeGroup">
+                    <label>סוג המסמך:</label>
+                    <select id="docTypeSelect" onchange="onDocTypeChange()">
+                        <option value="invoice">🧾 חשבונית</option>
+                        <option value="delivery">🚚 תעודת משלוח</option>
+                    </select>
+                    <div id="docTypeHint" style="font-size:0.75em; color:#16a085; margin-top:2px;"></div>
+                </div>
+                <div class="form-group">
+                    <label>ספק:</label>
+                    <select id="invoiceSupplierSelect"></select>
+                    <div id="supplierMatchHint" style="font-size:0.78em; margin-top:2px;"></div>
+                </div>
+                <div class="form-group">
+                    <label id="numberLabel">מספר חשבונית / אסמכתא:</label>
+                    <input type="text" id="invoiceNumberInput" placeholder="מספר חשבונית (אם קיים)" oninput="refreshNumberHint()">
+                    <div id="numberHint" style="font-size:0.78em; margin-top:2px;"></div>
+                </div>
+                <div class="form-group">
+                    <label>תאריך החשבונית:</label>
+                    <input type="date" id="invoiceDateInput" onchange="refreshDateHint()">
+                    <div id="dateHint" style="font-size:0.78em; margin-top:2px;"></div>
+                </div>
+                <div class="form-group">
+                    <label id="amountLabel">סכום לתשלום (₪):</label>
+                    <input type="number" id="invoiceAmountInput" step="0.01" placeholder="0.00">
+                </div>
+                <div class="form-group" id="paymentGroup">
+                    <label>אמצעי תשלום:</label>
+                    <input type="text" id="invoicePaymentMethodInput" list="paymentMethodsList" placeholder="בחר או הקלד אמצעי תשלום...">
+                    <datalist id="paymentMethodsList">
+                        <option value="כרטיס אשראי">כרטיס אשראי</option>
+                        <option value="העברה בנקאית">העברה בנקאית</option>
+                        <option value="הוראת קבע">הוראת קבע</option>
+                        <option value="עמלה">עמלה</option>
+                        <option value="צ'ק">צ'ק</option>
+                        <option value="זיכוי">זיכוי</option>
+                    </datalist>
+                </div>
+                <div class="form-group">
+                    <label>פרטים שזוהו בחשבונית:</label>
+                    <div id="invoiceItemsDisplay" class="items-list-box">טרם זוהו פרטים</div>
+                </div>
+                <div class="form-group hidden" id="handwrittenBox" style="background:#fffbea; border:1px solid #f1c40f; border-radius:8px; padding:8px;">
+                    <label style="color:#7d6608;">✍️ נמצא כתב יד - סמן מה רלוונטי:</label>
+                    <div id="handwrittenList" style="font-size:0.9em;"></div>
+                </div>
+                <div id="handwritingStatus" style="font-size:0.78em; margin:-6px 0 8px 0;"></div>
+                <div class="form-group">
+                    <label>הערות:</label>
+                    <input type="text" id="invoiceNotesInput" placeholder="הכללת הערה חודשית/פנימית לחשבונית...">
+                </div>
+                <div class="modal-actions">
+                    <button id="saveInvoiceBtn" onclick="saveInvoiceEntry()" style="background-color:#27ae60;">שמור חשבונית</button>
+                    <button onclick="cancelInvoiceEntry()" style="background-color:#7f8c8d;">ביטול</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- התראות שינוי מחיר -->
+        <div class="card hidden" id="priceAlertsCard" style="border:2px solid #e67e22;">
+            <h3 style="margin-top:0; color:#d35400;">📈 שינויי מחיר החודש</h3>
+            <p style="font-size:0.8em; color:#555; margin:-4px 0 6px 0;">מחיר ליחידה שעלה לעומת הרכישה הקודמת:</p>
+            <div class="table-wrapper" id="priceAlertsList"></div>
+        </div>
+
+        <!-- תעודות משלוח והתאמה לחשבונית מרכזת -->
+        <div class="card" id="deliveryCard" style="border:2px solid #16a085;">
+            <h3 style="margin-top:0; color:#16a085;">🚚 תעודות משלוח והתאמה לחשבונית מרכזת</h3>
+            <p style="font-size:0.8em; color:#555; margin:-4px 0 8px 0;">בסוף החודש, בחר ספק לבדיקת התאמה לחשבונית המרכזת.</p>
+
+            <h4 style="margin:14px 0 4px 0;">תעודות שנקלטו לחודש הנוכחי:</h4>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ספק</th>
+                            <th>מס' תעודה</th>
+                            <th>סכום</th>
+                            <th>פרטים</th>
+                            <th>פעולות</th>
+                        </tr>
+                    </thead>
+                    <tbody id="deliveryNotesTableBody">
+                        <tr><td colspan="5" style="color:#888;">טוען נתונים...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4 style="margin:14px 0 4px 0;">בדיקת התאמה לחשבונית מרכזת:</h4>
+            <div class="form-group">
+                <label>ספק:</label>
+                <select id="deliveryMatchSupplier" onchange="renderDeliveryMatch()">
+                    <option value="">-- בחר ספק --</option>
+                </select>
+            </div>
+            <div class="form-group hidden" id="consolidatedInvoiceWrap">
+                <label>החשבונית המרכזת:</label>
+                <select id="consolidatedInvoiceSelect" onchange="renderDeliveryMatch()"></select>
+            </div>
+            <div id="deliveryMatchResult"></div>
+        </div>
+
+        <!-- הצגת סיכום חודשי לפי ספק -->
+        <div class="card">
+            <h3 style="margin-top:0;">📊 סיכום חודשי ופרטים לפי ספק</h3>
+            <div class="form-group">
+                <label>פירוט מוצרים לפי ספק:</label>
+                <select id="supplierSummarySelect" onchange="renderSupplierSummary()">
+                    <option value="">-- בחר ספק --</option>
+                </select>
+            </div>
+            <div id="supplierSummaryDisplay" class="supplier-summary-card hidden"></div>
+        </div>
+
+        <!-- חיפוש וסיכום פריטים -->
+        <div class="card">
+            <h3 style="margin-top:0;">🔍 חיפוש פריט חודשי</h3>
+            <div style="display:flex; gap:6px;">
+                <input type="text" id="itemSearchQuery" placeholder="הכנס שם מוצר/פריט (לדוגמה: חלב, דגים, סלמון)...">
+                <button onclick="searchAndSummarizeItems()" style="width:auto; background-color:#27ae60; white-space:nowrap;">חפש פריט</button>
+            </div>
+            <div id="itemSearchResults" class="hidden search-results-box"></div>
+        </div>
+
+        <!-- גרפים -->
+        <div class="card">
+            <h3 style="margin-top:0;">📊 גרפים ומגמות</h3>
+            <button onclick="renderSpendCharts()" style="background-color:#8e44ad;">הצג הוצאות (6 חודשים אחרונים)</button>
+            <div id="spendChartsBox" style="margin-top:8px;"></div>
+            <hr style="border:0; border-top:1px solid #ddd; margin:10px 0;">
+            <div style="display:flex; gap:6px;">
+                <input type="text" id="trendItemQuery" placeholder="מגמת מחיר לפריט (לדוגמה: סלמון)...">
+                <button onclick="renderPriceTrend()" style="width:auto; background-color:#8e44ad; white-space:nowrap;">הצג מגמה</button>
+            </div>
+            <div id="priceTrendBox" style="margin-top:6px;"></div>
+        </div>
+
+        <!-- גיבוי -->
+        <div class="card">
+            <h3 style="margin-top:0;">💾 גיבוי נתונים</h3>
+            <button onclick="cloudBackupNow()" style="background-color:#16a085;">☁️ גבה עכשיו לענן</button>
+            <div id="backupInfo" style="font-size:0.8em; color:#555; margin:4px 0 8px;"></div>
+            <div id="backupList"></div>
+            <div style="display:flex; gap:6px;">
+                <button onclick="exportBackup()" style="background-color:#7f8c8d; width:auto; flex:1;">📤 ייצוא לקובץ</button>
+                <button onclick="document.getElementById('backupFileInput').click()" style="background-color:#7f8c8d; width:auto; flex:1;">📥 שחזור מקובץ</button>
+            </div>
+            <input type="file" id="backupFileInput" accept=".json,application/json" class="hidden" onchange="restoreFromFile(this)">
+        </div>
+
+        <!-- טבלת חשבוניות גולמיות -->
+        <div class="card">
+            <h3 style="margin-top:0;">חשבוניות החודש</h3>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ספק</th>
+                            <th>מס' חשבונית</th>
+                            <th>סכום</th>
+                            <th>אמצעי תשלום</th>
+                            <th>פרטים</th>
+                            <th>הערות</th>
+                            <th>פעולות</th>
+                        </tr>
+                    </thead>
+                    <tbody id="invoicesTableBody">
+                        <tr><td colspan="7" style="color:#888;">טוען נתונים...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- דוח ספקים חודשי אדיטבילי לייצוא -->
+        <div class="card" style="border: 2px solid #34495e;">
+            <h3 style="margin-top:0; color:#34495e;">📋 דוח ספקים חודשי מסוכם (ניתן לעריכה ישירה)</h3>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr style="background:#34495e; color:white;">
+                            <th>שם הספק</th>
+                            <th>סכום לתשלום / זיכוי (₪)</th>
+                            <th>אמצעי תשלום</th>
+                            <th>הערות</th>
+                        </tr>
+                    </thead>
+                    <tbody id="editableReportTableBody">
+                        <tr><td colspan="4" style="color:#888;">אין נתונים</td></tr>
+                    </tbody>
+                    <tfoot>
+                        <tr style="background:#f8f9fa; font-weight:bold;">
+                            <td>סה"כ לתשלום נטו</td>
+                            <td id="editableReportTotalCell" style="color:#1877f2; font-size:1.05em;">0.00 ₪</td>
+                            <td colspan="2"></td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+            
+            <div class="action-btns-group" style="margin-top:14px;">
+                <button class="pdf-btn" onclick="exportInvoicesToPDF()">📄 הורד דוח A4 לחודש (PDF)</button>
+                <button class="excel-btn" onclick="exportInvoicesToExcel()">📊 ייצוא לאקסל (XLSX)</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0;">ניהול רשימת ספקים:</h3>
+            <div style="display:flex; gap:6px;">
+                <input type="text" id="newSupplierNameInput" placeholder="שם ספק חדש...">
+                <button onclick="addSupplierToList()" style="width:auto; background-color:#3498db; white-space:nowrap;">הוסף</button>
+            </div>
+            <input type="text" id="supplierFilterInput" placeholder="🔍 חפש ספק..." oninput="renderSupplierManageList()" style="margin-top:8px;">
+            <div id="supplierListManage" style="margin-top:6px;"></div>
+        </div>
+
+        <div id="bioSettings" class="hidden" style="text-align:center; margin:8px 0;">
+            <button id="bioToggleBtn" onclick="toggleBiometric()" style="width:auto; background-color:#7f8c8d; margin-top:0;">🔐 הפעל כניסה בטביעת אצבע</button>
+        </div>
+    </div>
+
+    <!-- אלמנט נסתר להורדת PDF A4 -->
+    <div id="invoicesPdfContainer" style="display:block; position:fixed; left:-9999px; top:0; width:210mm; background:white; padding:16px; box-sizing:border-box; direction:rtl;">
+        <h2 style="text-align:center; font-size:24px; margin-bottom:4px;">סיכום חשבוניות חודשי</h2>
+        <div id="invoicesPdfMonthTitle" style="text-align:center; font-size:16px; color:#555; margin-bottom:16px;"></div>
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+                <tr style="background:#f5f6f7;">
+                    <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">שם הספק</th>
+                    <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">סכום לתשלום / זיכוי</th>
+                    <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">אמצעי תשלום</th>
+                    <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">הערות</th>
+                </tr>
+            </thead>
+            <tbody id="invoicesPdfTableBody"></tbody>
+            <tfoot>
+                <tr>
+                    <td style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;">סה"כ לתשלום נטו</td>
+                    <td id="invoicesPdfTotalCell" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;"></td>
+                    <td style="border:1px solid #999;"></td>
+                    <td style="border:1px solid #999;"></td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+
+    <script>
+// ---- הודעות קופצות ודיאלוגים (מחליפים alert / confirm / prompt) ----
+(function () {
+    function box() {
+        var b = document.getElementById('toastBox');
+        if (!b) { b = document.createElement('div'); b.id = 'toastBox'; document.body.appendChild(b); }
+        return b;
+    }
+    window.showToast = function (msg, type) {
+        var t = document.createElement('div');
+        t.className = 'toast' + (type ? ' ' + type : '');
+        t.textContent = String(msg);
+        var ms = Math.min(9000, 3500 + String(msg).length * 40);
+        var timer = setTimeout(remove, ms);
+        function remove() { clearTimeout(timer); if (t.parentNode) t.parentNode.removeChild(t); }
+        t.onclick = remove;
+        box().appendChild(t);
+    };
+    window.alert = function (msg) {
+        var m = String(msg);
+        var isErr = /שגיאה|נכשל|לא ניתן|אנא|שגוי|אזהרה|⚠/.test(m);
+        var isOk = /בהצלחה|נשמר/.test(m);
+        window.showToast(m, isErr ? 'err' : (isOk ? 'ok' : ''));
+    };
+    function dialog(msg, opts, withInput, def) {
+        opts = opts || {};
+        return new Promise(function (resolve) {
+            var ov = document.createElement('div');
+            ov.id = 'dlgOverlay';
+            var d = document.createElement('div'); d.className = 'dlg';
+            var m = document.createElement('div'); m.className = 'dlg-msg'; m.textContent = String(msg);
+            d.appendChild(m);
+            var inp = null;
+            if (withInput) {
+                inp = document.createElement('input');
+                inp.type = opts.password ? 'password' : 'text';
+                inp.value = def || '';
+                inp.style.marginBottom = '10px';
+                d.appendChild(inp);
+            }
+            var row = document.createElement('div'); row.className = 'dlg-btns';
+            var ok = document.createElement('button'); ok.textContent = opts.ok || 'אישור'; ok.style.backgroundColor = '#1877f2';
+            var no = document.createElement('button'); no.textContent = opts.cancel || 'ביטול'; no.style.backgroundColor = '#7f8c8d';
+            function done(v) { if (ov.parentNode) ov.parentNode.removeChild(ov); resolve(v); }
+            ok.onclick = function () { done(withInput ? inp.value : true); };
+            no.onclick = function () { done(withInput ? null : false); };
+            if (inp) inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') ok.click(); });
+            row.appendChild(ok); row.appendChild(no); d.appendChild(row);
+            ov.appendChild(d); document.body.appendChild(ov);
+            if (inp) setTimeout(function () { inp.focus(); inp.select(); }, 50);
+        });
+    }
+    window.appConfirm = function (msg, opts) { return dialog(msg, opts, false); };
+    window.appPrompt = function (msg, def, opts) { return dialog(msg, opts, true, def); };
+})();
+    </script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
         import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc, getDoc, getDocs, deleteDoc, onSnapshot, query, where, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
         import { getStorage, ref as storageRef, uploadString, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
@@ -2966,3 +3477,86 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
         })();
 
         initRestaurantId();
+    </script>
+    <script>
+        // גרסת בנייה: כשהיא משתנה מנקים פעם אחת את ה-service worker והמטמון, כדי שלא יוגש קוד ישן
+        var BUILD_ID = '2026-10-01-cam-debug';
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', async function () {
+                try {
+                    if (localStorage.getItem('app_build_id') !== BUILD_ID) {
+                        var regs = await navigator.serviceWorker.getRegistrations();
+                        await Promise.all(regs.map(function (r) { return r.unregister(); }));
+                        if (window.caches) { var ks = await caches.keys(); await Promise.all(ks.map(function (k) { return caches.delete(k); })); }
+                        localStorage.setItem('app_build_id', BUILD_ID);
+                    }
+                } catch (e) {}
+                navigator.serviceWorker.register('sw.js').catch(function () {});
+            });
+        }
+    </script>
+<script>
+(function(){
+    var open=false;
+    window.openImageViewer=function(url){
+        if(!url) return;
+        document.getElementById('imgViewerImg').src=url;
+        document.getElementById('imgViewerOverlay').classList.remove('hidden');
+        if(!open){ open=true; try{ history.pushState({imgViewer:1},''); }catch(e){} }
+    };
+    function hide(){
+        document.getElementById('imgViewerOverlay').classList.add('hidden');
+        document.getElementById('imgViewerImg').src='';
+        open=false;
+    }
+    window.closeImageViewer=function(){
+        if(open){ open=false; try{ history.back(); return; }catch(e){} }
+        hide();
+    };
+    window.addEventListener('popstate',function(){ if(!document.getElementById('imgViewerOverlay').classList.contains('hidden')) hide(); });
+})();
+</script>
+<script>
+// ---- כרטיסים מתקפלים ----
+(function () {
+    var KEY = 'invoices_folded_cards_v1';
+    function load() { try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { return {}; } }
+    function save(o) { try { localStorage.setItem(KEY, JSON.stringify(o)); } catch (e) {} }
+    function init() {
+        var main = document.getElementById('mainView');
+        if (!main || main.dataset.foldInit) return;
+        main.dataset.foldInit = '1';
+        var cards = [];
+        Array.prototype.forEach.call(main.children, function (card) {
+            if (!card.classList.contains('card')) return;
+            var h = card.firstElementChild;
+            if (!h || h.tagName !== 'H3') return;
+            var key = h.textContent.trim().slice(0, 40);
+            var body = document.createElement('div');
+            body.className = 'card-body';
+            while (h.nextSibling) body.appendChild(h.nextSibling);
+            card.appendChild(body);
+            card.classList.add('foldable');
+            card.classList.add('folded');   // בכל פתיחה של האפליקציה הכול מקופל
+            h.setAttribute('role', 'button');
+            h.addEventListener('click', function () {
+                card.classList.toggle('folded');
+            });
+            cards.push({ card: card, key: key });
+        });
+        if (!cards.length) return;
+        var tools = document.createElement('div');
+        tools.className = 'fold-tools';
+        function setAll(fold) {
+            cards.forEach(function (c) { c.card.classList.toggle('folded', fold); });
+        }
+        var b1 = document.createElement('button'); b1.textContent = '⬇ פתח הכול'; b1.onclick = function () { setAll(false); };
+        var b2 = document.createElement('button'); b2.textContent = '⬆ סגור הכול'; b2.onclick = function () { setAll(true); };
+        tools.appendChild(b1); tools.appendChild(b2);
+        main.insertBefore(tools, main.firstElementChild);
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+</script>
+</body>
+</html>

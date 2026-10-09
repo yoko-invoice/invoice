@@ -658,6 +658,30 @@
             document.getElementById('lockedView').classList.add('hidden');
             document.getElementById('mainView').classList.remove('hidden');
             initInvoicesModule();
+            consumeSharedFiles();
+        }
+
+        // קבצים ששותפו לאפליקציה מתוך אפליקציה אחרת (Share Target) - נשמרו ע"י sw.js
+        async function consumeSharedFiles() {
+            try {
+                if (!('caches' in window)) return;
+                if (!(await caches.has('shared-files'))) return;
+                const c = await caches.open('shared-files');
+                const reqs = await c.keys();
+                const files = [];
+                for (const r of reqs) {
+                    const res = await c.match(r);
+                    if (!res) continue;
+                    const blob = await res.blob();
+                    const name = decodeURIComponent(res.headers.get('X-Name') || 'shared');
+                    files.push(new File([blob], name, { type: res.headers.get('Content-Type') || blob.type }));
+                }
+                await caches.delete('shared-files');
+                try { history.replaceState(null, '', location.pathname); } catch (e) {}
+                if (!files.length) return;
+                const monthInput = document.getElementById('invoiceMonthSelect');
+                await handleScanFiles({ target: { files: files, value: '' } }, 'invoice');
+            } catch (e) { console.warn('shared files failed', e); }
         }
 
         async function refreshBiometricUI() {
@@ -3481,7 +3505,7 @@
     </script>
     <script>
         // גרסת בנייה: כשהיא משתנה מנקים פעם אחת את ה-service worker והמטמון, כדי שלא יוגש קוד ישן
-        var BUILD_ID = '2026-10-09-invoices-db';
+        var BUILD_ID = '2026-10-09-share-target';
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', async function () {
                 try {

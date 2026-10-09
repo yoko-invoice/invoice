@@ -1,4 +1,4 @@
-const CACHE = 'invoices-v8';
+const CACHE = 'invoices-v9';
 const CORE = ['./', 'index.html', 'manifest.json'];
 
 self.addEventListener('install', (e) => {

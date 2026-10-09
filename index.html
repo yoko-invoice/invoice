@@ -670,7 +670,29 @@
         }
         function bioEnrolled() { try { return !!localStorage.getItem(bioKey()); } catch (e) { return false; } }
 
+        // ---- חלון חסד: אחרי כניסה מוצלחת, אם האפליקציה נסגרה/ברקע פחות מ-30 שניות (למשל שיתוף חשבונית אליה) - לא נועלים שוב ----
+        const UNLOCK_GRACE_MS = 30000;
+        const lastActiveKey = () => 'invoices_last_active_' + RESTAURANT_ID;
+        let appUnlocked = false;
+        function markActive() {
+            if (!appUnlocked) return;
+            try { localStorage.setItem(lastActiveKey(), String(Date.now())); } catch (e) {}
+        }
+        function withinGrace() {
+            try {
+                const last = parseInt(localStorage.getItem(lastActiveKey()) || '0', 10);
+                return last > 0 && (Date.now() - last) < UNLOCK_GRACE_MS;
+            } catch (e) { return false; }
+        }
+        setInterval(function () { if (document.visibilityState === 'visible') markActive(); }, 2000);
+        document.addEventListener('visibilitychange', markActive);
+        window.addEventListener('pagehide', markActive);
+        window.addEventListener('load', function () {
+            if (RESTAURANT_ID && withinGrace()) enterApp();
+        });
+
         function enterApp() {
+            appUnlocked = true; markActive();
             document.getElementById('lockedView').classList.add('hidden');
             document.getElementById('mainView').classList.remove('hidden');
             initInvoicesModule();

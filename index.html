@@ -101,8 +101,9 @@
         #imgViewerOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 10000; display: flex; flex-direction: column; }
         #imgViewerOverlay .iv-bar { display: flex; justify-content: flex-end; padding: 10px; }
         #imgViewerOverlay .iv-close { margin: 0; width: auto; padding: 8px 18px; background: #7f8c8d; color: #fff; border: none; border-radius: 8px; font-size: 1em; }
-        #imgViewerOverlay .iv-body { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; text-align: center; }
-        #imgViewerOverlay .iv-body img { max-width: 100%; height: auto; touch-action: pinch-zoom; }
+        #imgViewerOverlay .iv-body { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; text-align: center; overscroll-behavior: contain; }
+        /* touch-action: pinch-zoom לבדו חסם גלילה באצבע אחת - לכן לא ניתן היה לגלול לעמודים הבאים */
+        #imgViewerOverlay .iv-body img { max-width: 100%; height: auto; display: block; margin: 0 auto; touch-action: pan-x pan-y pinch-zoom; }
 
         /* הודעות קופצות ודיאלוגים */
         #toastBox { position: fixed; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 10002; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; padding: 0 12px; }
@@ -211,6 +212,7 @@
                 <div id="priceAlertBox" class="hidden" style="border-radius:8px; padding:8px; margin-bottom:8px; font-size:0.85em; text-align:right;"></div>
                 <p style="font-size:0.8em; color:#555; margin:0 0 8px 0;"><b>בדוק את הפרטים</b> לפני השמירה (זיהוי AI עלול לטעות):</p>
                 <div id="invoicePreviewImgWrap" style="text-align:center; margin-bottom:10px;"></div>
+                <div id="pageSelectorBox" class="hidden" style="margin-bottom:10px;"></div>
                 <div id="addPagesRow" class="hidden" style="margin-bottom:10px;">
                     <div style="display:flex; gap:8px;">
                         <button type="button" data-recognition-trigger onclick="startAddPageCamera()" style="flex:1; padding:8px; font-size:0.85em; background:#fff; color:#1877f2; border:1px solid #1877f2; border-radius:8px;">📷 הוסף עמוד (צילום)</button>
@@ -670,8 +672,8 @@
         }
         function bioEnrolled() { try { return !!localStorage.getItem(bioKey()); } catch (e) { return false; } }
 
-        // ---- חלון חסד: אחרי כניסה מוצלחת, אם האפליקציה נסגרה/ברקע פחות מ-5 דקות (למשל שיתוף חשבונית אליה) - לא נועלים שוב ----
-        const UNLOCK_GRACE_MS = 5 * 60 * 1000;
+        // ---- חלון חסד: אחרי כניסה מוצלחת, אם האפליקציה נסגרה/ברקע פחות מ-15 דקות (למשל שיתוף חשבונית אליה) - לא נועלים שוב ----
+        const UNLOCK_GRACE_MS = 15 * 60 * 1000;
         const lastActiveKey = () => 'invoices_last_active_' + RESTAURANT_ID;
         let appUnlocked = false;
         function markActive() {
@@ -819,6 +821,10 @@
         let editingOriginalKind = null;      // 'invoice' | 'delivery' - הסוג של המסמך הקיים בזמן עריכה (לזיהוי המרה)
         let currentScanPages = [];           // עמודי הסריקה הנוכחית (base64) - לצורך הוספת עמודים
         let currentScanResults = [];         // תוצאות זיהוי לכל עמוד
+        let selectedScanPages = [];          // לכל עמוד בסריקה: true = לשמור ולהעלות, false = לדלג (ברירת מחדל: הכול מסומן)
+        let currentScanThumbs = [];          // תמונות ממוזערות לבורר העמודים
+        let previewBuildToken = 0;           // מונע מבנייה ישנה של התצוגה לדרוס בנייה חדשה
+        let scanPreviewPromise = Promise.resolve();   // השמירה ממתינה לו כדי שהתמונה תתאים לעמודים שסומנו
         let appendingToScan = false;         // המצלמה פתוחה להוספת עמוד למסמך הקיים
         let lastAutoAmount = null;           // הסכום שהמערכת מילאה אוטומטית (כדי לא לדרוס עריכה ידנית)
         let currentPriceChanges = { ups: [], downs: [] };
@@ -1692,6 +1698,7 @@
             if (saveBtn) { saveBtn.disabled = true; saveBtn.innerText = "שומר..."; }
 
             try {
+                await scanPreviewPromise;   // ממתין שהתמונה תתאים לעמודים שסומנו
                 const noteId = editingInvoiceId || makeInvoiceId();
                 const data = { id: noteId, docType: 'delivery_note', supplier, invoiceNumber: noteNumber, invoiceDate: noteDate, amount, notes, monthKey, items, handwrittenNotes: keptHandwrittenNotes() };
                 if (!isUpdate) {
@@ -2010,6 +2017,82 @@
             }
         }
 
+        // ---- בורר עמודים: ברירת מחדל כל העמודים מסומנים; עמוד שהסימון ממנו הוסר לא נשמר ולא מועלה ----
+        function makeThumb(b64) {
+            return new Promise((resolve) => {
+                const im = new Image();
+                im.onload = () => {
+                    const s = Math.min(1, 220 / Math.max(im.width, im.height));
+                    const c = document.createElement('canvas');
+                    c.width = Math.max(1, Math.round(im.width * s));
+                    c.height = Math.max(1, Math.round(im.height * s));
+                    c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+                    resolve(c.toDataURL('image/jpeg', 0.6));
+                };
+                im.onerror = () => resolve('data:image/jpeg;base64,' + b64);
+                im.src = 'data:image/jpeg;base64,' + b64;
+            });
+        }
+
+        function selectedPagesList() {
+            return currentScanPages.filter((_, i) => selectedScanPages[i] !== false);
+        }
+
+        async function initPageSelection(pages) {
+            selectedScanPages = pages.map(() => true);
+            currentScanThumbs = await Promise.all(pages.map(makeThumb));
+        }
+
+        // תצוגת המסמך שנסרק בטופס (לפי העמודים המסומנים)
+        function renderScanPreviewWrap() {
+            const wrap = document.getElementById('invoicePreviewImgWrap');
+            if (!wrap) return;
+            if (!recognizedImageBase64) {
+                wrap.innerHTML = currentScanPages.length
+                    ? '<div style="font-size:0.85em; color:#b9770e;">לא נבחר אף עמוד - המסמך יישמר בלי תמונה.</div>'
+                    : '';
+                return;
+            }
+            wrap.innerHTML = recognizedPageCount > 1
+                ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - לחץ להגדלה</div>`
+                : `<a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd; cursor:zoom-in;"></a><div style="font-size:0.75em; color:#555; margin-top:2px;">לחץ להגדלה</div>`;
+        }
+
+        // בונה מחדש את התמונה שתישמר/תועלה מהעמודים המסומנים בלבד
+        async function rebuildScanPreview() {
+            const token = ++previewBuildToken;
+            const pages = selectedPagesList();
+            const built = pages.length ? await buildScanPreview(pages) : null;
+            if (token !== previewBuildToken) return;   // נבנתה בינתיים תצוגה חדשה יותר
+            recognizedImageBase64 = built;
+            recognizedPageCount = pages.length;
+            renderScanPreviewWrap();
+        }
+
+        function renderPageSelector() {
+            const box = document.getElementById('pageSelectorBox');
+            if (!box) return;
+            if (editingInvoiceId || currentScanPages.length < 2) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+            const selCount = selectedPagesList().length;
+            const cells = currentScanThumbs.map((t, i) => {
+                const on = selectedScanPages[i] !== false;
+                return `<label style="flex:0 0 auto; width:78px; text-align:center; font-weight:normal; margin:0; cursor:pointer; border:2px solid ${on ? '#1877f2' : '#ccd0d5'}; border-radius:8px; padding:3px; background:#fff; opacity:${on ? 1 : 0.45};">
+                    <img src="${t}" style="width:100%; height:96px; object-fit:contain; background:#eee; display:block; border-radius:4px;">
+                    <span style="display:flex; align-items:center; justify-content:center; gap:4px; font-size:0.8em; margin-top:3px;"><input type="checkbox" style="width:auto; margin:0;" ${on ? 'checked' : ''} onchange="togglePageSelection(${i}, this.checked)"> עמוד ${i + 1}</span>
+                </label>`;
+            }).join('');
+            box.innerHTML = `<div style="font-size:0.8em; font-weight:600; margin-bottom:4px;">עמודים לשמירה (${selCount} מתוך ${currentScanPages.length}):</div>
+                <div style="display:flex; gap:6px; overflow-x:auto; padding-bottom:4px;">${cells}</div>
+                <div style="font-size:0.72em; color:#777; margin-top:2px;">עמוד שהסימון ממנו הוסר לא יישמר ולא יועלה.</div>`;
+            box.classList.remove('hidden');
+        }
+
+        window.togglePageSelection = function(i, checked) {
+            selectedScanPages[i] = Boolean(checked);
+            renderPageSelector();
+            scanPreviewPromise = rebuildScanPreview();
+        };
+
         // ---- הוספת עמודים למסמך שכבר נסרק (אחרי שהטופס נפתח) ----
         window.startAddPageCamera = function() {
             if (currentScanPages.length >= MAX_SCAN_PAGES) { alert(`הגעת למקסימום של ${MAX_SCAN_PAGES} עמודים במסמך.`); return; }
@@ -2040,10 +2123,12 @@
 
                 currentScanPages = allPages;
                 currentScanResults = allResults;
-                recognizedPageCount = allPages.length;
-                recognizedImageBase64 = await buildScanPreview(allPages);
-                document.getElementById('invoicePreviewImgWrap').innerHTML =
-                    `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - לחץ להגדלה</div>`;
+                // עמודים חדשים מסומנים כברירת מחדל; סימונים קיימים נשמרים
+                selectedScanPages = selectedScanPages.concat(newPages.map(() => true));
+                currentScanThumbs = currentScanThumbs.concat(await Promise.all(newPages.map(makeThumb)));
+                scanPreviewPromise = rebuildScanPreview();
+                await scanPreviewPromise;
+                renderPageSelector();
 
                 // פריטים: מאוחדים מכל העמודים
                 recognizedItemsList = Array.isArray(merged.items) ? merged.items : [];
@@ -2455,7 +2540,9 @@
             let retryScan = false;
 
             try {
+                previewBuildToken++;   // מבטל בנייה ישנה של תצוגה שעדיין רצה
                 currentScanPages = []; currentScanResults = [];
+                selectedScanPages = []; currentScanThumbs = [];
                 recognizedPageCount = pages.length;
                 recognizedImageBase64 = await buildScanPreview(pages);
 
@@ -2511,6 +2598,7 @@
                 currentScanMeta = meta;
                 currentScanPages = pages.slice();
                 currentScanResults = results.slice();
+                await initPageSelection(pages);   // כל העמודים מסומנים כברירת מחדל
                 lastAutoAmount = (typeof parsed.amount === 'number') ? parsed.amount : null;
                 scanMode = det.type;
                 autoDetectedDocType = det;
@@ -2596,11 +2684,7 @@
                 if (formTitle) formTitle.innerText = isDeliveryMode ? "אישור ואימות תעודת משלוח" : "אישור ואימות חשבונית";
                 if (saveBtn) saveBtn.innerText = isDeliveryMode ? "שמור תעודה" : "שמור חשבונית";
 
-                imgWrap.innerHTML = recognizedImageBase64
-                    ? (recognizedPageCount > 1
-                        ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - לחץ להגדלה</div>`
-                        : `<a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd; cursor:zoom-in;"></a><div style="font-size:0.75em; color:#555; margin-top:2px;">לחץ להגדלה</div>`)
-                    : '';
+                renderScanPreviewWrap();
 
                 lastRecognizedSupplierRaw = (recognized && recognized.supplier) ? String(recognized.supplier) : '';
                 lastRecognizedTaxId = (recognized && (recognized.taxId || recognized.businessId)) ? String(recognized.taxId || recognized.businessId) : '';
@@ -2664,8 +2748,9 @@
             renderHandwrittenBox();
             refreshDateHint();
             refreshNumberHint();
+            renderPageSelector();
             const addRow = document.getElementById('addPagesRow');
-            if (addRow) addRow.classList.toggle('hidden', Boolean(existingInvoice) || !recognizedImageBase64 || currentScanPages.length === 0);
+            if (addRow) addRow.classList.toggle('hidden', Boolean(existingInvoice) || currentScanPages.length === 0);
             const hwStatus = document.getElementById('handwritingStatus');
             if (hwStatus) {
                 const m = currentScanMeta;
@@ -2717,12 +2802,14 @@
 
         window.printScannedDocument = async function() {
             if (!currentScanPages.length) { alert("אין מסמך סרוק להדפסה."); return; }
-            await printPagesBase64(currentScanPages.slice());
+            const pages = selectedPagesList();   // רק העמודים המסומנים
+            if (!pages.length) { alert("לא נבחר אף עמוד להדפסה."); return; }
+            await printPagesBase64(pages);
         };
 
         window.saveAndPrintInvoice = async function() {
-            const pages = currentScanPages.slice();
-            if (!pages.length) { alert("אין מסמך סרוק להדפסה. השתמש ב'שמור חשבונית'."); return; }
+            const pages = selectedPagesList();
+            if (!pages.length) { alert("אין עמוד מסומן להדפסה. השתמש ב'שמור חשבונית'."); return; }
             await window.saveInvoiceEntry();
             const form = document.getElementById('invoiceConfirmForm');
             // הטופס נסגר = השמירה הצליחה; אם נשאר פתוח (חסר ספק/סכום וכו') לא מדפיסים
@@ -2810,6 +2897,7 @@
             if (saveBtn) { saveBtn.disabled = true; saveBtn.innerText = "שומר..."; }
 
             try {
+                await scanPreviewPromise;   // ממתין שהתמונה תתאים לעמודים שסומנו
                 const invoiceId = editingInvoiceId || makeInvoiceId();
                 const invData = {
                     id: invoiceId, docType: 'invoice', supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,
@@ -3591,7 +3679,8 @@
                     if (localStorage.getItem('app_build_id') !== BUILD_ID) {
                         var regs = await navigator.serviceWorker.getRegistrations();
                         await Promise.all(regs.map(function (r) { return r.unregister(); }));
-                        if (window.caches) { var ks = await caches.keys(); await Promise.all(ks.map(function (k) { return caches.delete(k); })); }
+                        // 'shared-files' מכיל קבצים ששותפו לאפליקציה וטרם נקלטו - לא מוחקים אותו
+                        if (window.caches) { var ks = await caches.keys(); await Promise.all(ks.filter(function (k) { return k !== 'shared-files'; }).map(function (k) { return caches.delete(k); })); }
                         localStorage.setItem('app_build_id', BUILD_ID);
                     }
                 } catch (e) {}

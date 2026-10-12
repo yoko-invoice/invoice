@@ -1,4 +1,4 @@
-const CACHE = 'invoices-v9';
+const CACHE = 'invoices-v10';
 const CORE = ['./', 'index.html', 'manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -9,7 +9,8 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      // 'shared-files' מחזיק קבצים ששותפו ועדיין לא נקלטו באפליקציה - אסור למחוק אותו בעדכון גרסה
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k !== 'shared-files').map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });

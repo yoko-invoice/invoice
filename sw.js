@@ -27,12 +27,13 @@ self.addEventListener('fetch', (e) => {
         for (const k of await c.keys()) await c.delete(k);
         let i = 0;
         for (const f of files) {
-          await c.put('/invoice/shared/' + (i++), new Response(f, {
+          await c.put(self.registration.scope + 'shared/' + (i++), new Response(f, {
             headers: { 'Content-Type': f.type || 'application/octet-stream', 'X-Name': encodeURIComponent(f.name || 'shared') }
           }));
         }
       } catch (err) {}
-      return Response.redirect('/invoice/index.html?shared=1', 303);
+      // הנתיב נגזר מה-scope של ה-service worker, כך שלא נשבר אם האפליקציה נפרסת תחת נתיב אחר
+      return Response.redirect(self.registration.scope + 'index.html?shared=1', 303);
     })());
     return;
   }

@@ -366,7 +366,8 @@
         <div class="card">
             <h3 style="margin-top:0;">💾 גיבוי נתונים</h3>
             <button onclick="cloudBackupNow()" style="background-color:#16a085;">☁️ גבה עכשיו לענן</button>
-            <div id="backupInfo" style="font-size:0.8em; color:#555; margin:4px 0 8px;"></div>
+            <div id="backupInfo" style="font-size:0.8em; color:#555; margin:4px 0 2px;"></div>
+            <div style="font-size:0.72em; color:#888; margin:0 0 8px;">הגיבוי כולל מסמכים, ספקים ומחירון - לא את תמונות המסמכים המקוריות.</div>
             <div id="backupList"></div>
             <div style="display:flex; gap:6px;">
                 <button onclick="exportBackup()" style="background-color:#7f8c8d; width:auto; flex:1;">📤 ייצוא לקובץ</button>
@@ -719,7 +720,6 @@
                 await caches.delete('shared-files');
                 try { history.replaceState(null, '', location.pathname); } catch (e) {}
                 if (!files.length) return;
-                const monthInput = document.getElementById('invoiceMonthSelect');
                 await handleScanFiles({ target: { files: files, value: '' } }, 'invoice');
             } catch (e) { console.warn('shared files failed', e); }
         }
@@ -805,6 +805,10 @@
         let recognizedImageBase64 = null;
         let recognizedItemsList = [];
         let editingInvoiceId = null;
+        // מזהה קבוע למסמך חדש לאורך כל ניסיונות השמירה באותו טופס: אם שמירה חרגה בזמן אך בפועל הצליחה,
+        // ניסיון חוזר ידרוס את אותו מסמך במקום ליצור כפילות
+        let pendingNewDocId = null;
+        function docIdForSave() { return editingInvoiceId || pendingNewDocId || (pendingNewDocId = makeInvoiceId()); }
         let customReportEdits = {};
 
         // ---- מצב סריקה (חשבונית / תעודת משלוח), ריבוי עמודים ומחירון ----
@@ -858,21 +862,14 @@
             ] : [
                 { facingMode: env, width: { ideal: 2048 }, height: { ideal: 1536 }, aspectRatio: { ideal: 4 / 3 } }
             ];
-            let fallback = null;
             for (const v of attempts) {
                 let s;
                 try { s = await navigator.mediaDevices.getUserMedia({ video: v, audio: false }); } catch (e) { continue; }
                 const st = s.getVideoTracks()[0].getSettings ? s.getVideoTracks()[0].getSettings() : {};
                 const isPortraitFrame = st.width && st.height ? st.height > st.width : true;
-                if (!portrait || isPortraitFrame) {
-                    if (fallback) fallback.getTracks().forEach(t => t.stop());
-                    return s;
-                }
-                if (fallback) fallback.getTracks().forEach(t => t.stop());
-                fallback = s;
-                // משחררים את המצלמה כדי שהניסיון הבא יוכל לפתוח מחדש
+                if (!portrait || isPortraitFrame) return s;
+                // הפריים יצא לרוחב למרות שהמסך לאורך - משחררים את המצלמה כדי שהניסיון הבא יוכל לפתוח מחדש
                 s.getTracks().forEach(t => t.stop());
-                fallback = null;
             }
             return await navigator.mediaDevices.getUserMedia({ video: { facingMode: env }, audio: false });
         }
@@ -1120,8 +1117,6 @@
 
             const fileInput = document.getElementById('fileUploadInput');
             if (fileInput) fileInput.addEventListener('change', (e) => handleScanFiles(e, 'invoice'));
-            const deliveryInput = document.getElementById('deliveryFileInput');
-            if (deliveryInput) deliveryInput.addEventListener('change', (e) => handleScanFiles(e, 'delivery'));
             const addPageInput = document.getElementById('addPageFileInput');
             if (addPageInput) addPageInput.addEventListener('change', handleAddPageFiles);
             const supplierSelectEl = document.getElementById('invoiceSupplierSelect');
@@ -1352,7 +1347,8 @@
             if (!container) return;
             const filterEl = document.getElementById('supplierFilterInput');
             const q = filterEl ? (filterEl.value || '').trim() : '';
-            const shown = q ? suppliersList.filter(s => s.includes(q)) : suppliersList;
+            const ql = q.toLowerCase();
+            const shown = q ? suppliersList.filter(s => s.toLowerCase().includes(ql)) : suppliersList;
             if (shown.length === 0) {
                 container.innerHTML = '<p style="color:#888; font-size:0.85em;">' + (suppliersList.length ? 'לא נמצא ספק.' : 'אין ספקים ברשימה.') + '</p>';
                 return;
@@ -1554,13 +1550,20 @@
             const snap = await getDocs(query(getSettingsCollection(), where('supplier', '==', oldName)));
             delete priceBookCache[oldName];
             delete priceBookCache[newName];
+            // יצירת הרשומה החדשה ומחיקת הישנה נכתבות יחד באותו batch, כך שכשל באמצע לא משאיר מחירון חצוי
+            const ops = [];
             for (const d of snap.docs) {
                 if (!d.id.startsWith('price_book_')) continue;
                 const x = d.data();
                 if (!x.key) continue;
                 const newId = 'price_book_' + await sha256Hex(newName + '|' + x.key);
-                await setDoc(doc(getSettingsCollection(), newId), { ...x, supplier: newName });
-                await deleteDoc(d.ref);
+                ops.push({ ref: doc(getSettingsCollection(), newId), data: { ...x, supplier: newName }, oldRef: d.ref });
+            }
+            const PER_BATCH = 200;   // כל רשומה = 2 פעולות, והמגבלה ב-Firestore היא 500 פעולות ל-batch
+            for (let i = 0; i < ops.length; i += PER_BATCH) {
+                const batch = writeBatch(db);
+                ops.slice(i, i + PER_BATCH).forEach(o => { batch.set(o.ref, o.data); batch.delete(o.oldRef); });
+                await batch.commit();
             }
         }
 
@@ -1699,7 +1702,7 @@
 
             try {
                 await scanPreviewPromise;   // ממתין שהתמונה תתאים לעמודים שסומנו
-                const noteId = editingInvoiceId || makeInvoiceId();
+                const noteId = docIdForSave();
                 const data = { id: noteId, docType: 'delivery_note', supplier, invoiceNumber: noteNumber, invoiceDate: noteDate, amount, notes, monthKey, items, handwrittenNotes: keptHandwrittenNotes() };
                 if (!isUpdate) {
                     data.createdAt = Date.now();
@@ -1736,6 +1739,7 @@
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
                 editingInvoiceId = null;
+                pendingNewDocId = null;
                 scanMode = 'invoice';
                 if (!isUpdate) learnDateChoice(supplier, noteDate, scanMetaAtSave);
                 alert(isUpdate ? (editingOriginalKind === 'invoice' ? "החשבונית הומרה לתעודת משלוח בהצלחה!" : "התעודה עודכנה בהצלחה!") : "התעודה נשמרה בהצלחה!");
@@ -2194,8 +2198,6 @@
             }
         }
 
-        async function handleInvoiceFile(event) { return handleScanFiles(event, 'invoice'); }
-
         // כתובת ה-Cloud Function שמבצעת את הזיהוי בפועל (שומרת את מפתח ה-AI בצד שרת, לא בדפדפן).
         // יש להחליף בכתובת האמיתית לאחר פריסת הפונקציה recognizeInvoice (ראו קובץ הפונקציה הנפרד).
         const RECOGNIZE_FUNCTION_URL = "https://recognizeinvoice-vngzfxix3a-uc.a.run.app";
@@ -2204,8 +2206,6 @@
             document.querySelectorAll('[data-recognition-trigger]').forEach(btn => btn.disabled = disabled);
             const fileInput = document.getElementById('fileUploadInput');
             if (fileInput) fileInput.disabled = disabled;
-            const deliveryInput = document.getElementById('deliveryFileInput');
-            if (deliveryInput) deliveryInput.disabled = disabled;
         }
 
         // בודק אם סכום הפריטים שזוהו רחוק מהסכום הכולל - סימן שה-AI כנראה פספס או המציא פרטים
@@ -2620,6 +2620,7 @@
         };
 
         function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {
+            pendingNewDocId = null;   // טופס חדש = מסמך חדש
             const confirmForm = document.getElementById('invoiceConfirmForm');
             const imgWrap = document.getElementById('invoicePreviewImgWrap');
             const formTitle = document.getElementById('confirmFormTitle');
@@ -2821,6 +2822,7 @@
             recognizedImageBase64 = null;
             recognizedItemsList = [];
             editingInvoiceId = null;
+            pendingNewDocId = null;
             scanMode = 'invoice';
             autoDetectedDocType = null;
             currentScanMeta = null;
@@ -2898,7 +2900,7 @@
 
             try {
                 await scanPreviewPromise;   // ממתין שהתמונה תתאים לעמודים שסומנו
-                const invoiceId = editingInvoiceId || makeInvoiceId();
+                const invoiceId = docIdForSave();
                 const invData = {
                     id: invoiceId, docType: 'invoice', supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,
                     items: recognizedItemsList, handwrittenNotes: keptHandwrittenNotes()
@@ -2945,6 +2947,7 @@
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
                 editingInvoiceId = null;
+                pendingNewDocId = null;
                 if (!isUpdate) learnDateChoice(supplier, invoiceDate, scanMetaAtSave);
                 alert(isUpdate ? (editingOriginalKind === 'delivery' ? "התעודה הומרה לחשבונית בהצלחה!" : "החשבונית עודכנה בהצלחה!") : "החשבונית נשמרה בהצלחה!");
                 if (monthKey !== selectedMonth) {

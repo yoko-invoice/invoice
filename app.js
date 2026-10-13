@@ -2543,11 +2543,19 @@
                 return;
             }
 
-            reportTbody.innerHTML = rows.map(r => {
+            reportTbody.innerHTML = rows.map((r, idx) => {
                 const isCredit = Number(r.amount) < 0;
                 return `
                     <tr>
-                        <td style="font-weight:bold; background:#fafafa;">${esc(r.name)}</td>
+                        <td style="font-weight:bold; background:#fafafa;">
+                            <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+                                <span>${esc(r.name)}</span>
+                                <span style="display:flex; gap:4px; flex-shrink:0;">
+                                    <button type="button" class="mv-btn" aria-label="העלה למעלה" ${idx === 0 ? 'disabled' : ''} onclick="moveReportRow(${idx}, -1)">▲</button>
+                                    <button type="button" class="mv-btn" aria-label="הורד למטה" ${idx === rows.length - 1 ? 'disabled' : ''} onclick="moveReportRow(${idx}, 1)">▼</button>
+                                </span>
+                            </div>
+                        </td>
                         <td class="editable-cell">
                             <input type="number" step="0.01" value="${r.amount}" 
                                 onchange="updateReportEdit('${esc(r.name)}', 'amount', this.value)" 
@@ -2568,6 +2576,25 @@
                 totalCell.innerText = `${total.toFixed(2)} ₪`;
             }
         }
+
+        // הזזת ספק למעלה/למטה בדוח החודשי. סדר הדוח נקבע לפי רשימת הספקים, ולכן מעדכנים אותה
+        // (וכך גם ייצוא ה-PDF וה-Excel יעקבו אחרי הסדר החדש). ספקים שהופיעו בדוח רק בגלל חשבוניות
+        // ולא ברשימה מצטרפים לרשימה בהזזה הראשונה.
+        window.moveReportRow = async function(idx, dir) {
+            const names = buildReportRows().map(r => r.name);
+            const j = idx + dir;
+            if (idx < 0 || j < 0 || j >= names.length) return;
+            [names[idx], names[j]] = [names[j], names[idx]];
+            suppliersList = names;
+            renderEditableReportTable();
+            try { renderSupplierSelect(); renderSupplierManageList(); } catch (e) { console.warn(e); }
+            try {
+                await ackOrQueue(setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }), 8000, "סדר ספקים");
+            } catch (e) {
+                console.warn("שמירת סדר הספקים נכשלה:", e);
+                showToast("⚠️ שמירת הסדר החדש נכשלה - נסה שוב.", "err");
+            }
+        };
 
         window.updateReportEdit = function(supplierName, field, value) {
             if (!customReportEdits[supplierName]) {
@@ -3015,6 +3042,31 @@
             if (!ok) alert('סיסמה שגויה.');
             return ok;
         }
+
+        // שינוי סיסמת הכניסה: מאמתים את הסיסמה הנוכחית, מקבלים חדשה פעמיים ושומרים hash עם salt חדש
+        window.changeAdminPassword = async function() {
+            if (navigator.onLine === false) { alert('שינוי סיסמה דורש חיבור לאינטרנט.'); return; }
+            try {
+                if (!(await askAdminPassword())) return;
+                const r1 = await appPrompt('הקלד סיסמה חדשה (לפחות 4 תווים):', '', { password: true });
+                if (r1 === null) return;
+                const np = r1.trim();
+                if (np.length < 4) { alert('הסיסמה קצרה מדי - לפחות 4 תווים.'); return; }
+                if (np === LEGACY_DEFAULT_PASSWORD) { alert('בחר סיסמה שונה מסיסמת ברירת המחדל.'); return; }
+                const r2 = await appPrompt('הקלד את הסיסמה החדשה שוב לאישור:', '', { password: true });
+                if (r2 === null) return;
+                if (r2.trim() !== np) { alert('הסיסמאות לא תואמות. הסיסמה לא שונתה.'); return; }
+
+                const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+                const hash = await hashPassword(np, salt);
+                // password: null מנקה סיסמה ישנה בטקסט גלוי, אם הייתה שמורה כך
+                await withTimeout(setDoc(getSettingsDoc('manager_config'), { passwordHash: hash, salt, password: null, passwordUpdatedAt: Date.now() }, { merge: true }), 10000, 'שינוי סיסמה');
+                showToast('✅ הסיסמה שונתה. השתמש בסיסמה החדשה בכניסה הבאה.');
+            } catch (e) {
+                console.warn('שינוי סיסמה נכשל:', e);
+                alert('שינוי הסיסמה נכשל - נסה שוב.');
+            }
+        };
 
         const KIND_LABEL = { manual: 'ידני', auto: 'אוטומטי', 'pre-restore': 'לפני שחזור' };
         function renderBackupList(list) {

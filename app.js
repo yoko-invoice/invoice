@@ -426,9 +426,11 @@
                 if (size > bestSize) { bestSize = size; bestLabel = cur; }
             }
             if (!bestLabel || bestSize < n * 0.2 || bestSize > n * 0.97) return null;
-            // פינות: הנקודות הקיצוניות של הרכיב
+            // פינות: הנקודות הקיצוניות של הרכיב (מתאים לדף עם פרספקטיבה מתונה) + נקודות לגוף קמור
             let tl = null, br = null, tr = null, bl = null;
             let minS = Infinity, maxS = -Infinity, minD = Infinity, maxD = -Infinity;
+            const rowMin = new Int32Array(h).fill(w), rowMax = new Int32Array(h).fill(-1);
+            const colMin = new Int32Array(w).fill(h), colMax = new Int32Array(w).fill(-1);
             for (let i = 0; i < n; i++) {
                 if (label[i] !== bestLabel) continue;
                 const x = i % w, y = (i - x) / w, s = x + y, d = x - y;
@@ -436,11 +438,71 @@
                 if (s > maxS) { maxS = s; br = [x, y]; }
                 if (d > maxD) { maxD = d; tr = [x, y]; }
                 if (d < minD) { minD = d; bl = [x, y]; }
+                if (x < rowMin[y]) rowMin[y] = x;
+                if (x > rowMax[y]) rowMax[y] = x;
+                if (y < colMin[x]) colMin[x] = y;
+                if (y > colMax[x]) colMax[x] = y;
             }
-            const q = [tl, tr, br, bl];
-            let area = 0;
-            for (let i = 0; i < 4; i++) { const a = q[i], b = q[(i + 1) % 4]; area += a[0] * b[1] - b[0] * a[1]; }
-            area = Math.abs(area) / 2;
+            const polyArea = (q) => {
+                let a = 0;
+                for (let i = 0; i < q.length; i++) { const p = q[i], r = q[(i + 1) % q.length]; a += p[0] * r[1] - r[0] * p[1]; }
+                return Math.abs(a) / 2;
+            };
+            // זווית בין שני קטעים (ברדיאנים, 0..π/2)
+            const edgeAng = (a, b) => Math.atan2(b[1] - a[1], b[0] - a[0]);
+            const angDiff = (a, b) => { const d = Math.abs(a - b) % Math.PI; return Math.min(d, Math.PI - d); };
+
+            // מלבן מינימלי (מסובב) סביב הרכיב: יציב גם למסמכים ארוכים וצרים, שבהם בחירת
+            // "פינות קיצוניות" נותנת מרובע מוטה/מעוות.
+            const pts = [];
+            for (let y = 0; y < h; y++) if (rowMax[y] >= 0) { pts.push([rowMin[y], y]); pts.push([rowMax[y], y]); }
+            for (let x = 0; x < w; x++) if (colMax[x] >= 0) { pts.push([x, colMin[x]]); pts.push([x, colMax[x]]); }
+            pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+            const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+            const lo = [], up = [];
+            for (const p of pts) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+            for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+            lo.pop(); up.pop();
+            const hull = lo.concat(up);
+            let rect = null;
+            if (hull.length >= 3) {
+                let best = null;
+                for (let i = 0; i < hull.length; i++) {
+                    const a = hull[i], b = hull[(i + 1) % hull.length];
+                    const len = Math.hypot(b[0] - a[0], b[1] - a[1]); if (!len) continue;
+                    const ux = (b[0] - a[0]) / len, uy = (b[1] - a[1]) / len, vx = -uy, vy = ux;
+                    let mnU = Infinity, mxU = -Infinity, mnV = Infinity, mxV = -Infinity;
+                    for (const p of hull) {
+                        const u = p[0] * ux + p[1] * uy, v = p[0] * vx + p[1] * vy;
+                        if (u < mnU) mnU = u; if (u > mxU) mxU = u; if (v < mnV) mnV = v; if (v > mxV) mxV = v;
+                    }
+                    const ar = (mxU - mnU) * (mxV - mnV);
+                    if (!best || ar < best.ar) best = { ar, ux, uy, vx, vy, mnU, mxU, mnV, mxV };
+                }
+                if (best) {
+                    const c = (u, v) => [u * best.ux + v * best.vx, u * best.uy + v * best.vy];
+                    const cs = [c(best.mnU, best.mnV), c(best.mxU, best.mnV), c(best.mxU, best.mxV), c(best.mnU, best.mxV)];
+                    // סידור: שני העליונים (לפי y) -> שמאל/ימין, ואז שני התחתונים
+                    const byY = cs.slice().sort((p, r) => p[1] - r[1]);
+                    const top = byY.slice(0, 2).sort((p, r) => p[0] - r[0]);
+                    const bot = byY.slice(2).sort((p, r) => p[0] - r[0]);
+                    rect = [top[0], top[1], bot[1], bot[0]];
+                }
+            }
+
+            // הרבעון "הקיצוני" מתאים לפרספקטיבה, אבל רק אם הצלעות שלו באמת מקבילות/ניצבות.
+            // אחרת (בדרך כלל מסמך ארוך) - משתמשים במלבן המינימלי כדי שהתמונה לא תצא מוטה.
+            let q = [tl, tr, br, bl];
+            // מסמך ארוך שיוצא מגבולות הפריים (למעלה/למטה): "פינות" הרכיב הן נקודות על שפת התמונה ולא פינות הדף,
+            // והמרובע שיוצא מוטה (גזירה) - הטקסט נשאר בהטייה גם אחרי היישור. במקרה כזה משתמשים במלבן המינימלי.
+            const onBorder = (p) => p && (p[0] <= 1 || p[1] <= 1 || p[0] >= w - 2 || p[1] >= h - 2);
+            const cornersOnBorder = [tl, tr, br, bl].filter(onBorder).length;
+            const extremeOk = tl && tr && br && bl && cornersOnBorder < 2 &&
+                angDiff(edgeAng(tl, tr), edgeAng(bl, br)) < 0.10 &&
+                angDiff(edgeAng(tl, bl), edgeAng(tr, br)) < 0.10 &&
+                Math.abs(angDiff(edgeAng(tl, tr), edgeAng(tl, bl)) - Math.PI / 2) < 0.20;
+            if (!extremeOk) { if (!rect) return null; q = rect; }
+            const area = polyArea(q);
             // הצורה חייבת להיראות כמו דף: הרכיב ממלא את רוב המרובע, והמרובע לא כמעט כל התמונה
             if (area < n * 0.2 || area > n * 0.97 || bestSize / area < 0.7) return null;
             return q;
@@ -458,9 +520,11 @@
                 if (!quad) return src;
                 // הגדלה חזרה לגודל המקורי + מרווח קטן החוצה כדי לא לגזור את קצה הדף
                 const cx = quad.reduce((a, p) => a + p[0], 0) / 4, cy = quad.reduce((a, p) => a + p[1], 0) / 4;
+                // בלי חיתוך הפינות לגבולות התמונה: במסמך ארוך שיוצא מהפריים הפינות יכולות להיות מחוץ לתמונה,
+                // וחיתוך שלהן היה מעוות את המלבן (הדגימה עצמה נחסמת לגבולות ב-warpQuad)
                 const P = quad.map(p => [
-                    Math.min(W - 1, Math.max(0, (cx + (p[0] - cx) * 1.015) / sc)),
-                    Math.min(H - 1, Math.max(0, (cy + (p[1] - cy) * 1.015) / sc))
+                    (cx + (p[0] - cx) * 1.015) / sc,
+                    (cy + (p[1] - cy) * 1.015) / sc
                 ]);
                 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
                 let outW = Math.round(Math.max(dist(P[0], P[1]), dist(P[3], P[2])));
@@ -1204,7 +1268,7 @@
                     try { await updatePriceBook(supplier, items, noteDate, 'delivery_note'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
 
-                document.getElementById('invoiceConfirmForm').classList.add('hidden');
+                document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
@@ -2191,16 +2255,7 @@
 
                 if (recognized) {
                     const dupList = isDeliveryMode ? monthlyNotes : monthlyInvoices;
-                    const isDuplicate = dupList.some(inv => {
-                        const sameSupplier = inv.supplier === recognized.supplier;
-                        const sameAmount = Math.abs((Number(inv.amount) || 0) - (Number(recognized.amount) || 0)) < 0.01;
-                        const sameNum = recognized.invoiceNumber && inv.invoiceNumber && (String(inv.invoiceNumber).trim() === String(recognized.invoiceNumber).trim());
-                        // בתעודות משלוח סכום זהה לבדו לא מעיד על כפילות (הזמנות חוזרות שכיחות) - נדרש מספר זהה, או סכום+תאריך
-                        if (isDeliveryMode) return sameSupplier && (sameNum || (sameAmount && inv.invoiceDate && inv.invoiceDate === recognized.invoiceDate));
-                        // אותו סכום אבל גם מספר וגם תאריך שונים (ושניהם קיימים) = חשבונית נפרדת, לא כפילות
-                        const diffNumAndDate = !sameNum && recognized.invoiceNumber && inv.invoiceNumber && recognized.invoiceDate && inv.invoiceDate && inv.invoiceDate !== recognized.invoiceDate;
-                        return sameSupplier && (sameNum || (sameAmount && !diffNumAndDate));
-                    });
+                    const isDuplicate = dupList.some(inv => isSameDocument(inv, recognized, isDeliveryMode));
 
                     if (isDuplicate) {
                         duplicateBox.classList.remove('hidden');
@@ -2289,7 +2344,7 @@
         };
 
         window.cancelInvoiceEntry = function() {
-            document.getElementById('invoiceConfirmForm').classList.add('hidden');
+            document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
             recognizedImageBase64 = null;
             recognizedItemsList = [];
             editingInvoiceId = null;
@@ -2354,14 +2409,7 @@
                         compareList = snapCmp.docs.map(d => d.data()).filter(x => x.docType !== 'delivery_note');
                     } catch (e) { compareList = []; }
                 }
-                const isDuplicate = compareList.some(inv => {
-                    const sameSupplier = inv.supplier === supplier;
-                    const sameAmount = Math.abs((Number(inv.amount) || 0) - amount) < 0.01;
-                    const sameNum = invoiceNumber && inv.invoiceNumber && (String(inv.invoiceNumber).trim() === invoiceNumber);
-                    // אותו סכום אבל גם מספר וגם תאריך שונים (ושניהם קיימים) = חשבונית נפרדת, לא כפילות
-                    const diffNumAndDate = !sameNum && invoiceNumber && inv.invoiceNumber && invoiceDate && inv.invoiceDate && inv.invoiceDate !== invoiceDate;
-                    return sameSupplier && (sameNum || (sameAmount && !diffNumAndDate));
-                });
+                const isDuplicate = compareList.some(inv => isSameDocument(inv, { supplier, invoiceNumber, invoiceDate, amount }, false));
                 if (isDuplicate && !await appConfirm(`⚠️ חשבונית דומה (ספק: ${supplier}, סכום: ${amount} ₪) כבר קיימת במערכת.\nלשמור בכל זאת?`)) {
                     return;
                 }
@@ -2413,7 +2461,7 @@
                 if (!isUpdate && amount > 0) {
                     try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
-                document.getElementById('invoiceConfirmForm').classList.add('hidden');
+                document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
@@ -2530,12 +2578,26 @@
             }
         };
 
+        // האם מסמך קיים (ex) הוא כפילות של מסמך חדש (c = {supplier, invoiceNumber, invoiceDate, amount})?
+        function isSameDocument(ex, c, isDelivery) {
+            if (ex.supplier !== c.supplier) return false;
+            const exNum = String(ex.invoiceNumber || '').trim(), cNum = String(c.invoiceNumber || '').trim();
+            // יש מספר לשני המסמכים: המספר מחליט. מספרים שונים = מסמכים שונים, גם באותו תאריך ובאותו סכום
+            if (exNum && cNum) return exNum === cNum;
+            const amt = Number(c.amount) || 0;
+            if (Math.abs(amt) < 0.01) return false;   // סכום 0 לבדו לא מעיד על כפילות
+            if (Math.abs((Number(ex.amount) || 0) - amt) >= 0.01) return false;
+            const exDate = ex.invoiceDate || '', cDate = c.invoiceDate || '';
+            if (isDelivery) return Boolean(exDate && exDate === cDate);
+            return !(exDate && cDate && exDate !== cDate);
+        }
+
         function renderEditableReportTable() {
             const reportTbody = document.getElementById('editableReportTableBody');
             const totalCell = document.getElementById('editableReportTotalCell');
             if (!reportTbody) return;
 
-            const { rows, total } = getFinalReportData();
+            const { rows, total, commission, totalWithCommission } = getFinalReportData();
 
             if (rows.length === 0) {
                 reportTbody.innerHTML = '<tr><td colspan="4" style="color:#888;">אין ספקים ברשימה</td></tr>';
@@ -2574,6 +2636,14 @@
 
             if (totalCell) {
                 totalCell.innerText = `${total.toFixed(2)} ₪`;
+            }
+            const commRow = document.getElementById('editableReportCommRow');
+            const commCell = document.getElementById('editableReportTotalWithCommCell');
+            const totalLabel = document.getElementById('editableReportTotalLabel');
+            if (commRow && commCell && totalLabel) {
+                commRow.style.display = commission ? '' : 'none';
+                totalLabel.innerText = commission ? 'סה"כ ללא עמלה' : 'סה"כ לתשלום נטו';
+                commCell.innerText = `${totalWithCommission.toFixed(2)} ₪`;
             }
         }
 
@@ -2636,10 +2706,29 @@
             });
         }
 
+        // עמלה שנכתבה בשדה אמצעי התשלום: "עמלה 15", "עמלה 2.5%", "אשראי עמלה 12.50 ₪", "2% עמלה"
+        // אחוז מחושב מסכום הספק; סכום קבוע נלקח כמו שהוא.
+        function parseCommission(method, amount) {
+            const s = String(method || '');
+            if (s.indexOf('עמלה') === -1) return 0;
+            const base = Number(amount) || 0;
+            let re = /עמלה\s*[:=]?\s*(-?\d+(?:[.,]\d+)?)\s*(%|₪|ש"ח|שח)?/g;
+            let ms = [...s.matchAll(re)];
+            if (!ms.length) { re = /(-?\d+(?:[.,]\d+)?)\s*(%|₪|ש"ח|שח)?\s*עמלה/g; ms = [...s.matchAll(re)]; }
+            let sum = 0;
+            ms.forEach(m => {
+                const v = parseFloat(m[1].replace(',', '.'));
+                if (!isFinite(v)) return;
+                sum += (m[2] === '%') ? base * v / 100 : v;
+            });
+            return sum;
+        }
+
         function getFinalReportData() {
             const rows = buildReportRows();
             const total = rows.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-            return { rows, total };
+            const commission = Math.round(rows.reduce((sum, r) => sum + parseCommission(r.method, r.amount), 0) * 100) / 100;
+            return { rows, total, commission, totalWithCommission: total + commission };
         }
 
         function populateSupplierSummaryOptions() {
@@ -2778,7 +2867,7 @@
         };
 
         window.exportInvoicesToPDF = async function() {
-            const { rows, total } = getFinalReportData();
+            const { rows, total, commission, totalWithCommission } = getFinalReportData();
             if (rows.length === 0) { alert("אין נתונים לדוח לחודש זה."); return; }
 
             const monthKey = getSelectedInvoiceMonth();
@@ -2800,6 +2889,9 @@
 
             document.getElementById('invoicesPdfTableBody').innerHTML = rowsHtml;
             document.getElementById('invoicesPdfTotalCell').innerText = `${total.toFixed(2)} ₪`;
+            document.getElementById('invoicesPdfTotalLabel').innerText = commission ? 'סה"כ ללא עמלה' : 'סה"כ לתשלום נטו';
+            document.getElementById('invoicesPdfCommRow').style.display = commission ? '' : 'none';
+            document.getElementById('invoicesPdfTotalCommCell').innerText = `${totalWithCommission.toFixed(2)} ₪`;
 
             const exportContainer = document.getElementById('invoicesPdfContainer');
             await new Promise(resolve => setTimeout(resolve, 300));
@@ -2842,7 +2934,7 @@
         };
 
         window.exportInvoicesToExcel = function() {
-            const { rows, total } = getFinalReportData();
+            const { rows, total, commission, totalWithCommission } = getFinalReportData();
             if (rows.length === 0) {
                 alert("אין נתונים לדוח לחודש זה לייצוא.");
                 return;
@@ -2863,7 +2955,12 @@
                 ]);
             });
 
-            excelData.push(["", "סה\"כ לתשלום נטו", total, "", ""]);
+            if (commission) {
+                excelData.push(["", "סה\"כ ללא עמלה", total, "", ""]);
+                excelData.push(["", "סה\"כ כולל עמלה", totalWithCommission, "", ""]);
+            } else {
+                excelData.push(["", "סה\"כ לתשלום נטו", total, "", ""]);
+            }
 
             const ws = XLSX.utils.aoa_to_sheet(excelData);
             const wb = XLSX.utils.book_new();

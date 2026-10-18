@@ -292,8 +292,13 @@
                     </tbody>
                     <tfoot>
                         <tr style="background:#f8f9fa; font-weight:bold;">
-                            <td>סה"כ לתשלום נטו</td>
+                            <td id="editableReportTotalLabel">סה"כ לתשלום נטו</td>
                             <td id="editableReportTotalCell" style="color:#1877f2; font-size:1.05em;">0.00 ₪</td>
+                            <td colspan="2"></td>
+                        </tr>
+                        <tr id="editableReportCommRow" style="background:#f8f9fa; font-weight:bold; display:none;">
+                            <td>סה"כ כולל עמלה</td>
+                            <td id="editableReportTotalWithCommCell" style="color:#1877f2; font-size:1.05em;">0.00 ₪</td>
                             <td colspan="2"></td>
                         </tr>
                     </tfoot>
@@ -337,8 +342,14 @@
             <tbody id="invoicesPdfTableBody"></tbody>
             <tfoot>
                 <tr>
-                    <td style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;">סה"כ לתשלום נטו</td>
+                    <td id="invoicesPdfTotalLabel" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;">סה"כ לתשלום נטו</td>
                     <td id="invoicesPdfTotalCell" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;"></td>
+                    <td style="border:1px solid #999;"></td>
+                    <td style="border:1px solid #999;"></td>
+                </tr>
+                <tr id="invoicesPdfCommRow" style="display:none;">
+                    <td style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;">סה"כ כולל עמלה</td>
+                    <td id="invoicesPdfTotalCommCell" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;"></td>
                     <td style="border:1px solid #999;"></td>
                     <td style="border:1px solid #999;"></td>
                 </tr>

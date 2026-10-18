@@ -2597,7 +2597,7 @@
             const totalCell = document.getElementById('editableReportTotalCell');
             if (!reportTbody) return;
 
-            const { rows, total, commission, totalWithCommission } = getFinalReportData();
+            const { rows, total, hasCommission, totalWithoutCommission, totalWithCommission } = getFinalReportData();
 
             if (rows.length === 0) {
                 reportTbody.innerHTML = '<tr><td colspan="4" style="color:#888;">אין ספקים ברשימה</td></tr>';
@@ -2641,8 +2641,9 @@
             const commCell = document.getElementById('editableReportTotalWithCommCell');
             const totalLabel = document.getElementById('editableReportTotalLabel');
             if (commRow && commCell && totalLabel) {
-                commRow.style.display = commission ? '' : 'none';
-                totalLabel.innerText = commission ? 'סה"כ ללא עמלה' : 'סה"כ לתשלום נטו';
+                commRow.style.display = hasCommission ? '' : 'none';
+                totalLabel.innerText = hasCommission ? 'סה"כ ללא עמלה' : 'סה"כ לתשלום נטו';
+                if (hasCommission) totalCell.innerText = `${totalWithoutCommission.toFixed(2)} ₪`;
                 commCell.innerText = `${totalWithCommission.toFixed(2)} ₪`;
             }
         }
@@ -2706,29 +2707,15 @@
             });
         }
 
-        // עמלה שנכתבה בשדה אמצעי התשלום: "עמלה 15", "עמלה 2.5%", "אשראי עמלה 12.50 ₪", "2% עמלה"
-        // אחוז מחושב מסכום הספק; סכום קבוע נלקח כמו שהוא.
-        function parseCommission(method, amount) {
-            const s = String(method || '');
-            if (s.indexOf('עמלה') === -1) return 0;
-            const base = Number(amount) || 0;
-            let re = /עמלה\s*[:=]?\s*(-?\d+(?:[.,]\d+)?)\s*(%|₪|ש"ח|שח)?/g;
-            let ms = [...s.matchAll(re)];
-            if (!ms.length) { re = /(-?\d+(?:[.,]\d+)?)\s*(%|₪|ש"ח|שח)?\s*עמלה/g; ms = [...s.matchAll(re)]; }
-            let sum = 0;
-            ms.forEach(m => {
-                const v = parseFloat(m[1].replace(',', '.'));
-                if (!isFinite(v)) return;
-                sum += (m[2] === '%') ? base * v / 100 : v;
-            });
-            return sum;
-        }
+        // ספקים שאמצעי התשלום שלהם מסומן "עמלה": הסכום שלהם נכלל ב"כולל עמלה" ולא נכלל ב"ללא עמלה"
+        const isCommissionRow = (r) => String(r.method || '').indexOf('עמלה') !== -1;
 
         function getFinalReportData() {
             const rows = buildReportRows();
             const total = rows.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-            const commission = Math.round(rows.reduce((sum, r) => sum + parseCommission(r.method, r.amount), 0) * 100) / 100;
-            return { rows, total, commission, totalWithCommission: total + commission };
+            const commission = rows.filter(isCommissionRow).reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+            const hasCommission = rows.some(isCommissionRow);
+            return { rows, total, commission, hasCommission, totalWithoutCommission: total - commission, totalWithCommission: total };
         }
 
         function populateSupplierSummaryOptions() {
@@ -2867,7 +2854,7 @@
         };
 
         window.exportInvoicesToPDF = async function() {
-            const { rows, total, commission, totalWithCommission } = getFinalReportData();
+            const { rows, total, hasCommission, totalWithoutCommission, totalWithCommission } = getFinalReportData();
             if (rows.length === 0) { alert("אין נתונים לדוח לחודש זה."); return; }
 
             const monthKey = getSelectedInvoiceMonth();
@@ -2889,8 +2876,9 @@
 
             document.getElementById('invoicesPdfTableBody').innerHTML = rowsHtml;
             document.getElementById('invoicesPdfTotalCell').innerText = `${total.toFixed(2)} ₪`;
-            document.getElementById('invoicesPdfTotalLabel').innerText = commission ? 'סה"כ ללא עמלה' : 'סה"כ לתשלום נטו';
-            document.getElementById('invoicesPdfCommRow').style.display = commission ? '' : 'none';
+            document.getElementById('invoicesPdfTotalLabel').innerText = hasCommission ? 'סה"כ ללא עמלה' : 'סה"כ לתשלום נטו';
+            if (hasCommission) document.getElementById('invoicesPdfTotalCell').innerText = `${totalWithoutCommission.toFixed(2)} ₪`;
+            document.getElementById('invoicesPdfCommRow').style.display = hasCommission ? '' : 'none';
             document.getElementById('invoicesPdfTotalCommCell').innerText = `${totalWithCommission.toFixed(2)} ₪`;
 
             const exportContainer = document.getElementById('invoicesPdfContainer');
@@ -2934,7 +2922,7 @@
         };
 
         window.exportInvoicesToExcel = function() {
-            const { rows, total, commission, totalWithCommission } = getFinalReportData();
+            const { rows, total, hasCommission, totalWithoutCommission, totalWithCommission } = getFinalReportData();
             if (rows.length === 0) {
                 alert("אין נתונים לדוח לחודש זה לייצוא.");
                 return;
@@ -2955,8 +2943,8 @@
                 ]);
             });
 
-            if (commission) {
-                excelData.push(["", "סה\"כ ללא עמלה", total, "", ""]);
+            if (hasCommission) {
+                excelData.push(["", "סה\"כ ללא עמלה", totalWithoutCommission, "", ""]);
                 excelData.push(["", "סה\"כ כולל עמלה", totalWithCommission, "", ""]);
             } else {
                 excelData.push(["", "סה\"כ לתשלום נטו", total, "", ""]);

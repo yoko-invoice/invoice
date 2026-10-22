@@ -3169,7 +3169,8 @@
                 .filter(i => i.source === 'email')
                 .sort((a, b) => String(a.invoiceDate || '').localeCompare(String(b.invoiceDate || '')));
             if (emailInvs.length === 0) {
-                alert("אין חשבוניות מהמייל בחודש זה. חשבוניות שתאשר ותשמור מהמייל יופיעו כאן.");
+                // הודעה בתוך הדף ולא alert - בחלק מהמכשירים alert באפליקציה מותקנת מציג דף לבן
+                showToast("אין חשבוניות מהמייל בחודש זה. חשבוניות שתאשר ותשמור מהמייל יופיעו כאן.", "err");
                 return;
             }
             const btn = document.getElementById('emailInvPdfBtn');
@@ -3271,10 +3272,10 @@
             if (btn) { btn.disabled = false; btn.innerText = origText; }
             try {
                 window.print();
-                if (noImgCount > 0) alert(`שים לב: ${noImgCount} חשבוניות הודפסו ככותרת בלבד (בלי תמונה).`);
+                if (noImgCount > 0) showToast(`שים לב: ${noImgCount} חשבוניות הודפסו ככותרת בלבד (בלי תמונה).`, "err");
             } catch (e) {
                 cleanup();
-                alert("לא ניתן לפתוח את חלון ההדפסה.");
+                showToast("לא ניתן לפתוח את חלון ההדפסה.", "err");
             }
         };
 

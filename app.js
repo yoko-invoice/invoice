@@ -345,7 +345,7 @@
             const portrait = window.innerHeight >= window.innerWidth;
             const env = { ideal: "environment" };
             const attempts = portrait ? [
-                { facingMode: env, width: { ideal: 1536 }, height: { ideal: 2048 }, aspectRatio: { exact: 3 / 4 } },
+                { facingMode: env, width: { ideal: 1536 }, height: { ideal: 2048 }, aspectRatio: { ideal: 3 / 4 } },
                 { facingMode: env, width: { ideal: 1080 }, height: { ideal: 1440 }, aspectRatio: { ideal: 3 / 4 } },
                 { facingMode: env, width: { ideal: 2048 }, height: { ideal: 1536 }, aspectRatio: { ideal: 3 / 4 } },
                 { facingMode: env, width: { ideal: 1080 }, height: { ideal: 1920 } },
@@ -390,6 +390,16 @@
                     const caps = trk.getCapabilities ? trk.getCapabilities() : {};
                     if (caps.zoom && typeof caps.zoom.min === 'number') await trk.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
                 } catch (e) { /* לא קריטי */ }
+                // פוקוס/חשיפה/איזון לבן רציפים (כל אחד בנפרד כדי שאי-תמיכה באחד לא תבטל את האחרים) + כפתור פנס
+                try {
+                    const trk2 = cameraStream.getVideoTracks()[0];
+                    const caps2 = trk2.getCapabilities ? trk2.getCapabilities() : {};
+                    const has = (k, v) => caps2[k] && (Array.isArray(caps2[k]) ? caps2[k].includes(v) : true);
+                    for (const [k, v] of [['focusMode', 'continuous'], ['exposureMode', 'continuous'], ['whiteBalanceMode', 'continuous']]) {
+                        if (has(k, v)) { try { await trk2.applyConstraints({ advanced: [{ [k]: v }] }); } catch (e) { /* לא קריטי */ } }
+                    }
+                    setupTorchButton(trk2, caps2);
+                } catch (e) { /* לא קריטי */ }
                 video.onplaying = () => { video.style.opacity = '1'; };
                 video.srcObject = cameraStream;
                 try { await video.play(); } catch (e) { /* autoplay מטפל בזה */ }
@@ -399,7 +409,25 @@
             }
         };
 
+        function setupTorchButton(trk, caps) {
+            const old = document.getElementById('cameraTorchBtn');
+            if (old) old.remove();
+            if (!caps || !caps.torch) return;
+            const ctl = document.getElementById('cameraModalControls');
+            if (!ctl) return;
+            const b = document.createElement('button');
+            b.id = 'cameraTorchBtn'; b.type = 'button'; b.textContent = '🔦 פנס';
+            b.style.cssText = 'background-color:#f39c12;';
+            let on = false;
+            b.onclick = async () => {
+                try { on = !on; await trk.applyConstraints({ advanced: [{ torch: on }] }); b.textContent = on ? '🔦 כבה' : '🔦 פנס'; }
+                catch (e) { on = false; }
+            };
+            ctl.insertBefore(b, ctl.firstChild);
+        }
+
         window.closeCameraModal = function() {
+            const tb = document.getElementById('cameraTorchBtn'); if (tb) tb.remove();
             const overlay = document.getElementById('cameraModalOverlay');
             const video = document.getElementById('cameraModalVideo');
             overlay.classList.add('hidden');
@@ -413,7 +441,7 @@
 
         // ---- חיתוך אוטומטי של המסמך: זיהוי דף בהיר על רקע כהה + יישור פרספקטיבה ----
         // אם לא זוהה דף בביטחון — מחזיר את התמונה המקורית ללא שינוי.
-        function findDocumentQuad(rgba, w, h) {
+        function findDocumentQuad(rgba, w, h, thrFactor) {
             const n = w * h, gray = new Uint8Array(n), hist = new Array(256).fill(0);
             for (let i = 0, p = 0; i < n; i++, p += 4) {
                 const g = (rgba[p] * 299 + rgba[p + 1] * 587 + rgba[p + 2] * 114) / 1000 | 0;
@@ -430,6 +458,7 @@
                 const between = wB * wF * (mB - mF) * (mB - mF);
                 if (between > best) { best = between; thr = t; }
             }
+            if (thrFactor && thrFactor !== 1) thr = Math.max(20, Math.round(thr * thrFactor));
             // הרכיב הבהיר הרציף הגדול ביותר
             const label = new Int32Array(n), stack = new Int32Array(n);
             let bestLabel = 0, bestSize = 0, cur = 0;
@@ -537,15 +566,23 @@
                 const sm = document.createElement('canvas'); sm.width = w; sm.height = h;
                 const sctx = sm.getContext('2d', { willReadFrequently: true });
                 sctx.drawImage(src, 0, 0, w, h);
-                const quad = findDocumentQuad(sctx.getImageData(0, 0, w, h).data, w, h);
+                const imgd = sctx.getImageData(0, 0, w, h).data;
+                const pArea = (q) => { let a = 0; for (let i = 0; i < 4; i++) { const p = q[i], r = q[(i + 1) % 4]; a += p[0] * r[1] - r[0] * p[1]; } return Math.abs(a) / 2; };
+                let quad = findDocumentQuad(imgd, w, h, 1);
+                // סף מקל: מצלם עם צל/מעבר תאורה — Otsu חותך חלק מהדף. אם הסף המקל נותן מרובע תקין וגדול יותר, משתמשים בו
+                const quadL = findDocumentQuad(imgd, w, h, 0.72);
+                const touches = (q) => q.filter(p => p[0] <= 1 || p[1] <= 1 || p[0] >= w - 2 || p[1] >= h - 2).length;
+                if (quadL && touches(quadL) < 2 && pArea(quadL) < w * h * 0.9 && (!quad || (pArea(quadL) > pArea(quad) * 1.04 && pArea(quadL) < pArea(quad) * 1.8))) quad = quadL;
                 if (!quad) return src;
+                // דף קטן מדי בפריים = כנראה זיהוי שגוי; עדיף הפריים המלא מאשר חיתוך שגוי
+                if (pArea(quad) < w * h * 0.35) return src;
                 // הגדלה חזרה לגודל המקורי + מרווח קטן החוצה כדי לא לגזור את קצה הדף
                 const cx = quad.reduce((a, p) => a + p[0], 0) / 4, cy = quad.reduce((a, p) => a + p[1], 0) / 4;
                 // בלי חיתוך הפינות לגבולות התמונה: במסמך ארוך שיוצא מהפריים הפינות יכולות להיות מחוץ לתמונה,
                 // וחיתוך שלהן היה מעוות את המלבן (הדגימה עצמה נחסמת לגבולות ב-warpQuad)
                 const P = quad.map(p => [
-                    (cx + (p[0] - cx) * 1.015) / sc,
-                    (cy + (p[1] - cy) * 1.015) / sc
+                    (cx + (p[0] - cx) * 1.04) / sc,
+                    (cy + (p[1] - cy) * 1.04) / sc
                 ]);
                 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
                 let outW = Math.round(Math.max(dist(P[0], P[1]), dist(P[3], P[2])));
@@ -609,6 +646,23 @@
             const vw = video.videoWidth, vh = video.videoHeight;
             const ctx = canvas.getContext('2d');
             ctx.setTransform(1, 0, 0, 1, 0, 0);
+            const blurScore = (cv) => {
+                try {
+                    const sc = Math.min(1, 700 / Math.max(cv.width, cv.height));
+                    const w = Math.max(16, Math.round(cv.width * sc)), h = Math.max(16, Math.round(cv.height * sc));
+                    const t = document.createElement('canvas'); t.width = w; t.height = h;
+                    const tc = t.getContext('2d', { willReadFrequently: true }); tc.drawImage(cv, 0, 0, w, h);
+                    const d = tc.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
+                    for (let k = 0, p = 0; k < g.length; k++, p += 4) g[k] = d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114;
+                    let sum = 0, sum2 = 0, c = 0;
+                    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+                        const i = y * w + x, l = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w];
+                        sum += l; sum2 += l * l; c++;
+                    }
+                    const m = sum / c; return sum2 / c - m * m;
+                } catch (e) { return 1e9; }
+            };
+            const grab = async () => {
             let drawn = false;
             // ניסיון 1: תמונה סטילס ברזולוציה מלאה מהחיישן (ImageCapture.takePhoto) — כיוון נכון, בלי פסים
             try {
@@ -644,7 +698,23 @@
                 canvas.height = Math.round(vh * out);
                 ctx.drawImage(video, 0, 0, vw, vh, 0, 0, canvas.width, canvas.height);
             }
-            const base64Data = autoCropDocument(canvas).toDataURL('image/jpeg', 0.9).split(',')[1];
+            };
+            // השהיה קצרה אחרי הלחיצה כדי שהפוקוס יתייצב, ואם התמונה מטושטשת — צילום חוזר אחד ובחירת החדה יותר
+            await new Promise(r => setTimeout(r, 350));
+            await grab();
+            try {
+                const sc1 = blurScore(canvas);
+                if (sc1 < 150) {
+                    const keep = document.createElement('canvas'); keep.width = canvas.width; keep.height = canvas.height;
+                    keep.getContext('2d').drawImage(canvas, 0, 0);
+                    await new Promise(r => setTimeout(r, 700));
+                    await grab();
+                    const sc2 = blurScore(canvas);
+                    console.log('blur scores', sc1, sc2);
+                    if (sc2 < sc1) { canvas.width = keep.width; canvas.height = keep.height; canvas.getContext('2d').drawImage(keep, 0, 0); }
+                }
+            } catch (e) { console.log('blur check failed', e); }
+            const base64Data = enhanceDocument(autoCropDocument(canvas)).toDataURL('image/jpeg', 0.9).split(',')[1];
             closeCameraModal();
             cameraPages.push(base64Data);
             const canAddPage = cameraPages.length < MAX_SCAN_PAGES - (appendingToScan ? currentScanPages.length : 0);
@@ -1493,6 +1563,86 @@
         const MAX_UPLOAD_DIMENSION = 2000;   // הועלה מ-1280: ספרות קטנות (6/4) וכתב יד אבדו בכיווץ
         const UPLOAD_JPEG_QUALITY = 0.88;
 
+
+        // ===== שיפור "כמו סורק": יישור תאורה, ניגודיות וחידוד. נשאר בצבע (כתב יד/חותמות). =====
+        // אם התוצאה נראית חריגה - מחזירים את המקור, כדי שלא יהיה יותר גרוע מקודם.
+        function enhanceDocument(src) {
+            try {
+                const W = src.width, H = src.height;
+                if (W < 300 || H < 300) return src;
+                const sctx = src.getContext('2d', { willReadFrequently: true });
+                const img = sctx.getImageData(0, 0, W, H), d = img.data;
+                // 1) הערכת רקע (נייר): תמונה קטנה, "סגירה" (max ואז טשטוש) מסירה את הטקסט
+                const S = 24;                                  // גודל תא ברקע, בפיקסלים של המקור
+                const bw = Math.max(4, Math.round(W / S)), bh = Math.max(4, Math.round(H / S));
+                const sm = document.createElement('canvas'); sm.width = bw; sm.height = bh;
+                const smc = sm.getContext('2d', { willReadFrequently: true });
+                smc.imageSmoothingEnabled = true; smc.imageSmoothingQuality = 'high';
+                smc.drawImage(src, 0, 0, bw, bh);
+                const sd = smc.getImageData(0, 0, bw, bh).data;
+                const lum = new Float32Array(bw * bh);
+                for (let i = 0; i < bw * bh; i++) lum[i] = 0.299 * sd[i * 4] + 0.587 * sd[i * 4 + 1] + 0.114 * sd[i * 4 + 2];
+                const maxf = (a, r) => { const o = new Float32Array(bw * bh); for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) { let m = 0; for (let yy = Math.max(0, y - r); yy <= Math.min(bh - 1, y + r); yy++) for (let xx = Math.max(0, x - r); xx <= Math.min(bw - 1, x + r); xx++) { const v = a[yy * bw + xx]; if (v > m) m = v; } o[y * bw + x] = m; } return o; };
+                const boxf = (a, r) => { const o = new Float32Array(bw * bh); for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) { let t = 0, c = 0; for (let yy = Math.max(0, y - r); yy <= Math.min(bh - 1, y + r); yy++) for (let xx = Math.max(0, x - r); xx <= Math.min(bw - 1, x + r); xx++) { t += a[yy * bw + xx]; c++; } o[y * bw + x] = t / c; } return o; };
+                const bgS = boxf(maxf(lum, 2), 2);
+                // 2) מגדילים את מפת הרקע חזרה (אינטרפולציה חלקה) ומחשבים רווח לכל פיקסל
+                const bgc = document.createElement('canvas'); bgc.width = bw; bgc.height = bh;
+                const bgctx = bgc.getContext('2d'); const bgd = bgctx.createImageData(bw, bh);
+                for (let i = 0; i < bw * bh; i++) { const v = Math.max(0, Math.min(255, bgS[i])); bgd.data[i * 4] = v; bgd.data[i * 4 + 1] = v; bgd.data[i * 4 + 2] = v; bgd.data[i * 4 + 3] = 255; }
+                bgctx.putImageData(bgd, 0, 0);
+                const big = document.createElement('canvas'); big.width = W; big.height = H;
+                const bigc = big.getContext('2d', { willReadFrequently: true });
+                bigc.imageSmoothingEnabled = true; bigc.imageSmoothingQuality = 'high';
+                bigc.drawImage(bgc, 0, 0, W, H);
+                const bg = bigc.getImageData(0, 0, W, H).data;
+                // רמת הנייר הכללית (חציון הרקע) - אם הרקע כהה מדי/אחיד מדי, כמעט לא נוגעים
+                const sortedBg = Array.from(bgS).sort((a, b) => a - b);
+                const paper = sortedBg[Math.floor(sortedBg.length * 0.5)];
+                if (paper < 70) return src;                     // תמונה כהה מאוד: לא ננסה "לתקן"
+                const target = 248;
+                const hist = new Uint32Array(256);
+                const out = sctx.createImageData(W, H), od = out.data;
+                for (let i = 0, n = W * H; i < n; i++) {
+                    const p = i * 4;
+                    const g = Math.min(2.2, target / Math.max(60, bg[p]));   // רווח מקסימלי מוגבל, למניעת הגברת רעש
+                    const r = d[p] * g, gg = d[p + 1] * g, b = d[p + 2] * g;
+                    od[p] = r > 255 ? 255 : r; od[p + 1] = gg > 255 ? 255 : gg; od[p + 2] = b > 255 ? 255 : b; od[p + 3] = 255;
+                    hist[(0.299 * od[p] + 0.587 * od[p + 1] + 0.114 * od[p + 2]) | 0]++;
+                }
+                // 3) מתיחת שחורים: האחוזון ה-1 הופך לשחור, כדי שהדיו ייראה חד יותר (בלי לשנות את הלבן)
+                const total = W * H; let acc = 0, black = 0;
+                for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * 0.01) { black = v; break; } }
+                black = Math.min(black, 90);
+                const scale = 255 / Math.max(1, 255 - black);
+                // 4) חידוד עדין (unsharp 3x3) על הערוצים
+                const tmp = new Uint8ClampedArray(od.length);
+                for (let i = 0; i < od.length; i += 4) { tmp[i] = Math.max(0, Math.min(255, (od[i] - black) * scale)); tmp[i + 1] = Math.max(0, Math.min(255, (od[i + 1] - black) * scale)); tmp[i + 2] = Math.max(0, Math.min(255, (od[i + 2] - black) * scale)); tmp[i + 3] = 255; }
+                const AMT = 0.6;
+                for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+                    const p = (y * W + x) * 4;
+                    for (let k = 0; k < 3; k++) {
+                        const c = tmp[p + k];
+                        const nb = (tmp[p - 4 + k] + tmp[p + 4 + k] + tmp[p - W * 4 + k] + tmp[p + W * 4 + k]) / 4;
+                        const v = c + AMT * (c - nb);
+                        od[p + k] = v < 0 ? 0 : v > 255 ? 255 : v;
+                    }
+                    od[p + 3] = 255;
+                }
+                const oc = document.createElement('canvas'); oc.width = W; oc.height = H;
+                oc.getContext('2d').putImageData(out, 0, 0);
+                return oc;
+            } catch (e) { console.warn('enhanceDocument failed', e); return src; }
+        }
+
+        // גודל פלט: גם למסמכים ארוכים שומרים רוחב קריא (עד 3600px לצלע הארוכה), במקום לכווץ ל-2000
+        function capDocumentSize(w, h) {
+            const long = Math.max(w, h), short = Math.min(w, h);
+            let cap = MAX_UPLOAD_DIMENSION;
+            if (long / short > 1.6) cap = Math.min(3600, Math.max(MAX_UPLOAD_DIMENSION, Math.round(1500 * (long / short))));
+            const sc = Math.min(1, cap / long);
+            return [Math.round(w * sc), Math.round(h * sc)];
+        }
+
         function fileToBase64(file) {
             return new Promise((resolve, reject) => {
                 const img = new Image();
@@ -1500,21 +1650,26 @@
 
                 img.onload = () => {
                     URL.revokeObjectURL(objectUrl);
-
-                    let { width, height } = img;
-                    if (width > MAX_UPLOAD_DIMENSION || height > MAX_UPLOAD_DIMENSION) {
-                        const scale = MAX_UPLOAD_DIMENSION / Math.max(width, height);
-                        width = Math.round(width * scale);
-                        height = Math.round(height * scale);
+                    try {
+                        // מקור בגודל מלא (עד 4000px) -> חיתוך לדף ויישור -> שיפור -> התאמת גודל לשליחה
+                        let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+                        const pre = Math.min(1, 4000 / Math.max(w, h));
+                        w = Math.round(w * pre); h = Math.round(h * pre);
+                        const base = document.createElement('canvas'); base.width = w; base.height = h;
+                        base.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
+                        let work = autoCropDocument(base);          // מחזיר את המקור אם לא זוהה דף
+                        work = enhanceDocument(work);
+                        const [ow, oh] = capDocumentSize(work.width, work.height);
+                        const fin = document.createElement('canvas'); fin.width = ow; fin.height = oh;
+                        const fctx = fin.getContext('2d'); fctx.imageSmoothingQuality = 'high';
+                        fctx.drawImage(work, 0, 0, ow, oh);
+                        resolve(fin.toDataURL('image/jpeg', UPLOAD_JPEG_QUALITY).split(',')[1]);
+                    } catch (e) {
+                        console.warn('scan processing failed, sending original', e);
+                        const c2 = document.createElement('canvas'); c2.width = img.width; c2.height = img.height;
+                        c2.getContext('2d').drawImage(img, 0, 0);
+                        resolve(c2.toDataURL('image/jpeg', UPLOAD_JPEG_QUALITY).split(',')[1]);
                     }
-
-                    const canvas = document.createElement('canvas');
-                    canvas.width = width;
-                    canvas.height = height;
-                    const ctx = canvas.getContext('2d');
-                    ctx.drawImage(img, 0, 0, width, height);
-
-                    resolve(canvas.toDataURL('image/jpeg', UPLOAD_JPEG_QUALITY).split(',')[1]);
                 };
 
                 img.onerror = () => {

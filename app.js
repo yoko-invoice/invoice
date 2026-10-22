@@ -1,9 +1,10 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
         import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc, getDoc, getDocs, deleteDoc, onSnapshot, query, where, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+        import { getAuth, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
         import { getStorage, ref as storageRef, uploadString, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
         const firebaseConfig = {
-            apiKey: "AIzaSyASfsSMXS62ehM1kVSjOpudOEUGUh37BYI",
+            apiKey: "AIzaSyASfs5MXS62ehM1kVSj0pudOEUGUh37BYI",
             authDomain: "work-schedule-17c39.firebaseapp.com",
             projectId: "work-schedule-17c39",
             storageBucket: "work-schedule-17c39.firebasestorage.app",
@@ -18,6 +19,47 @@
             db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) }, 'invoices');
         } catch (e) { db = getFirestore(app, 'invoices'); }
         const storage = getStorage(app);
+        const fbAuth = getAuth(app);
+        const INVOICE_AUTH_URL = "https://invoiceauth-vngzfxix3a-uc.a.run.app";
+
+        // כניסה לשרת: הסיסמה נבדקת בשרת (לא בדפדפן). מחזיר 'ok' | 'wrong' | 'locked' | 'network'
+        async function serverLogin(pass, newPass) {
+            try {
+                const body = { rid: RESTAURANT_ID, password: pass };
+                if (newPass != null) body.newPassword = newPass;
+                const r = await fetch(INVOICE_AUTH_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                if (r.status === 403) return 'wrong';
+                if (r.status === 429) return 'locked';
+                if (r.status === 400 && newPass != null) return 'weak';
+                if (!r.ok) return 'network';
+                const j = await r.json();
+                await signInWithCustomToken(fbAuth, j.token);
+                return 'ok';
+            } catch (e) { console.warn('serverLogin failed', e); return 'network'; }
+        }
+        async function hasSession() {
+            try {
+                await fbAuth.authStateReady();
+                if (!fbAuth.currentUser) return false;
+                const t = await fbAuth.currentUser.getIdTokenResult();
+                return t.claims.invApp === true && t.claims.rid === RESTAURANT_ID;
+            } catch (e) { return false; }
+        }
+        function loginMsg(r) {
+            if (r === 'wrong') alert('סיסמה שגויה!');
+            else if (r === 'locked') alert('יותר מדי נסיונות. נסה שוב בעוד כמה דקות.');
+            else alert('שגיאה בחיבור לרשת.');
+        }
+        // כניסה בטביעת אצבע / חלון חסד: אם אין חיבור פעיל לשרת, מבקשים סיסמה
+        async function enterAppWithSession() {
+            if (await hasSession()) { enterApp(); return true; }
+            const raw = await appPrompt('הקלד סיסמת מנהל:', '', { password: true });
+            if (raw === null) return false;
+            const r = await serverLogin(raw.trim());
+            if (r !== 'ok') { loginMsg(r); return false; }
+            enterApp();
+            return true;
+        }
 
         if (window.pdfjsLib) {
             window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
@@ -100,33 +142,12 @@
 
         window.unlockApp = async function() {
             if (!RESTAURANT_ID) return;
-            let cfg = null;
-            try {
-                const docSnap = await getDoc(getSettingsDoc("manager_config"));
-                if (docSnap.exists()) cfg = docSnap.data();
-            } catch(e) {
-                alert("שגיאה בחיבור לרשת.");
-                return;
-            }
-
             const rawPass = await appPrompt("הקלד סיסמת מנהל:", "", { password: true });
             if (rawPass === null) return;
-            const pass = rawPass.trim();
-
-            try {
-                let ok = false;
-                if (cfg && cfg.passwordHash && cfg.salt) {
-                    ok = (await hashPassword(pass, cfg.salt)) === cfg.passwordHash;
-                } else if (cfg && cfg.password) {
-                    ok = (pass === String(cfg.password));
-                } else {
-                    ok = (pass === LEGACY_DEFAULT_PASSWORD);
-                }
-                if (!ok) { alert("סיסמה שגויה!"); return; }
-
-                enterApp();
-                offerBiometricEnroll();
-            } catch(e) { alert("שגיאה באימות הסיסמה."); }
+            const r = await serverLogin(rawPass.trim());
+            if (r !== 'ok') { loginMsg(r); return; }
+            enterApp();
+            offerBiometricEnroll();
         };
 
         // ================= כניסה בטביעת אצבע (WebAuthn) =================
@@ -161,7 +182,7 @@
         document.addEventListener('visibilitychange', markActive);
         window.addEventListener('pagehide', markActive);
         window.addEventListener('load', function () {
-            if (RESTAURANT_ID && withinGrace()) enterApp();
+            if (RESTAURANT_ID && withinGrace()) enterAppWithSession();
         });
 
         function enterApp() {
@@ -237,7 +258,7 @@
                     userVerification: 'required',
                     timeout: 60000
                 } });
-                enterApp();
+                await enterAppWithSession();
             } catch (e) {
                 if (e && e.name !== 'NotAllowedError') alert('הזיהוי בטביעת אצבע נכשל. היכנס עם סיסמה.');
             }
@@ -1983,9 +2004,11 @@
         async function recognizeOnePageOnce(base64Data, opts = {}) {
             let response;
             try {
+            let idTok = '';
+            try { await fbAuth.authStateReady(); idTok = fbAuth.currentUser ? await fbAuth.currentUser.getIdToken() : ''; } catch (e) { console.warn(e); }
             response = await fetch(RECOGNIZE_FUNCTION_URL, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", "Authorization": "Bearer " + idTok },
                 body: JSON.stringify({
                     image: base64Data,
                     mediaType: 'image/jpeg',
@@ -3116,16 +3139,10 @@
         async function askAdminPassword() {
             const raw = await appPrompt('פעולה רגישה - הקלד סיסמת מנהל:', '', { password: true });
             if (raw === null) return false;
-            const pass = raw.trim();
-            let cfg = null;
-            const snap = await getDoc(getSettingsDoc('manager_config'));
-            if (snap.exists()) cfg = snap.data();
-            let ok;
-            if (cfg && cfg.passwordHash && cfg.salt) ok = (await hashPassword(pass, cfg.salt)) === cfg.passwordHash;
-            else if (cfg && cfg.password) ok = (pass === String(cfg.password));
-            else ok = (pass === LEGACY_DEFAULT_PASSWORD);
-            if (!ok) alert('סיסמה שגויה.');
-            return ok;
+            const r = await serverLogin(raw.trim());
+            if (r !== 'ok') { loginMsg(r); return false; }
+            window.__lastAdminPass = raw.trim();
+            return true;
         }
 
         // שינוי סיסמת הכניסה: מאמתים את הסיסמה הנוכחית, מקבלים חדשה פעמיים ושומרים hash עם salt חדש
@@ -3142,10 +3159,11 @@
                 if (r2 === null) return;
                 if (r2.trim() !== np) { alert('הסיסמאות לא תואמות. הסיסמה לא שונתה.'); return; }
 
-                const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
-                const hash = await hashPassword(np, salt);
-                // password: null מנקה סיסמה ישנה בטקסט גלוי, אם הייתה שמורה כך
-                await withTimeout(setDoc(getSettingsDoc('manager_config'), { passwordHash: hash, salt, password: null, passwordUpdatedAt: Date.now() }, { merge: true }), 10000, 'שינוי סיסמה');
+                const lastPass = window.__lastAdminPass;
+                if (!lastPass) { alert('שינוי הסיסמה נכשל - נסה שוב.'); return; }
+                const rr = await serverLogin(lastPass, np);
+                if (rr !== 'ok') { alert(rr === 'weak' ? 'בחר סיסמה אחרת (לפחות 4 תווים).' : 'שינוי הסיסמה נכשל - נסה שוב.'); return; }
+                window.__lastAdminPass = null;
                 showToast('✅ הסיסמה שונתה. השתמש בסיסמה החדשה בכניסה הבאה.');
             } catch (e) {
                 console.warn('שינוי סיסמה נכשל:', e);

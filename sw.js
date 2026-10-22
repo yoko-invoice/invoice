@@ -1,4 +1,4 @@
-const CACHE = 'invoices-v12';
+const CACHE = 'invoices-v13';
 
 // קבצי האפליקציה (חובה לעבודה אופליין)
 const CORE = [
@@ -15,6 +15,7 @@ const LIBS = [
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
   'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js',
+  'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js',
   'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js',
   'https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js'
 ];

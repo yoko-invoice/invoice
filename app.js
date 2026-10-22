@@ -730,6 +730,128 @@
             else await processScanPages(pagesToProcess);
         };
 
+        // ---- חשבוניות שהגיעו מהמייל (טיוטות לאישור) ----
+        const INBOX_FILE_URL = "https://invoiceinboxfile-vngzfxix3a-uc.a.run.app";
+        let inboxItems = [], inboxSeen = {}, inboxListenerOn = false, pendingInboxItem = null, inboxDupCache = {};
+        function inboxCol() { return collection(db, `${RESTAURANT_ID}_inbox`); }
+        function startInboxListener() {
+            if (inboxListenerOn) return;
+            inboxListenerOn = true;
+            try {
+                onSnapshot(inboxCol(), (snap) => {
+                    const st = snap.docs.find(d => d.id === '_status');
+                    inboxSeen = (st && st.data().seen) || {};
+                    inboxItems = snap.docs.filter(d => d.id !== '_status').map(d => ({ id: d.id, ...d.data() }))
+                        .filter(x => x.status === 'pending')
+                        .sort((a, b) => String(b.mailDate || '').localeCompare(String(a.mailDate || '')));
+                    renderInboxButton();
+                    if (document.getElementById('inboxModal')) renderInboxModal();
+                }, (e) => console.warn('inbox listener', e));
+            } catch (e) { console.warn('inbox listener failed', e); }
+        }
+        function renderInboxButton() {
+            let b = document.getElementById('inboxFab');
+            const stale = Object.values(inboxSeen).some(t => Date.now() - Date.parse(t) > 3 * 24 * 3600 * 1000);
+            if (!inboxItems.length && !stale) { if (b) b.remove(); return; }
+            if (!b) {
+                b = document.createElement('button');
+                b.id = 'inboxFab'; b.type = 'button';
+                b.style.cssText = 'position:fixed; bottom:16px; left:16px; z-index:900; width:auto; margin:0; padding:10px 14px; border-radius:24px; background:#1877f2; color:#fff; border:none; box-shadow:0 2px 8px rgba(0,0,0,.3); font-size:0.95em; cursor:pointer;';
+                b.onclick = () => openInboxModal();
+                document.body.appendChild(b);
+            }
+            b.textContent = `📧 חשבוניות מהמייל (${inboxItems.length})` + (stale ? ' ⚠️' : '');
+        }
+        window.openInboxModal = function() {
+            if (document.getElementById('inboxModal')) return;
+            const m = document.createElement('div');
+            m.id = 'inboxModal';
+            m.style.cssText = 'position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,.55); display:flex; align-items:flex-end; justify-content:center;';
+            m.innerHTML = '<div id="inboxModalBox" style="background:#fff; width:100%; max-width:560px; max-height:85vh; overflow-y:auto; border-radius:14px 14px 0 0; padding:12px; direction:rtl;"></div>';
+            m.addEventListener('click', (e) => { if (e.target === m) closeInboxModal(); });
+            document.body.appendChild(m);
+            renderInboxModal();
+        };
+        window.closeInboxModal = function() { const m = document.getElementById('inboxModal'); if (m) m.remove(); };
+        function inboxIsLikelyDup(it) {
+            const f = it.fields || {};
+            const num = String(f.invoiceNumber || '').trim();
+            if (!num) return Promise.resolve(false);
+            const key = it.id;
+            if (key in inboxDupCache) return Promise.resolve(inboxDupCache[key]);
+            return getDocs(query(getInvoicesCollection(), where("invoiceNumber", "==", num))).then(snap => {
+                const amt = Number(f.amount) || 0;
+                const r = snap.docs.some(d => { const x = d.data(); return Math.abs((Number(x.amount) || 0) - amt) < 0.01 || String(x.supplier || '') === String(f.supplier || ''); });
+                inboxDupCache[key] = r; return r;
+            }).catch(() => false);
+        }
+        function renderInboxModal() {
+            const box = document.getElementById('inboxModalBox');
+            if (!box) return;
+            const fmt = (n) => (Number(n) || 0).toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            let html = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><b>📧 חשבוניות מהמייל - לאישור (${inboxItems.length})</b><button type="button" onclick="closeInboxModal()" style="width:auto; margin:0; padding:4px 10px; background:#7f8c8d;">סגור</button></div>`;
+            if (!inboxItems.length) html += '<div style="color:#777; padding:12px;">אין חשבוניות ממתינות.</div>';
+            for (const it of inboxItems) {
+                const f = it.fields || {};
+                const title = it.aiFailed ? '(לא זוהה - לבדיקה ידנית)' : esc(f.supplier || 'ספק לא מזוהה');
+                const kind = f.docType === 'delivery_note' ? 'תעודת משלוח' : 'חשבונית';
+                html += `<div style="border:1px solid #ddd; border-radius:10px; padding:8px; margin-bottom:8px;">
+                    <div style="display:flex; justify-content:space-between; gap:8px;"><b>${title}</b><span>${f.amount ? fmt(f.amount) + ' ₪' : ''}</span></div>
+                    <div style="font-size:0.85em; color:#555;">${kind} ${esc(f.invoiceNumber || '')} ${esc(f.invoiceDate || '')}</div>
+                    <div style="font-size:0.78em; color:#888; direction:ltr; text-align:right;">${esc(it.fromEmail || '')} | ${esc(it.subject || '')}</div>
+                    <div style="font-size:0.75em; color:#888;">נקלט מ: ${esc(it.account || '')}</div>
+                    <div id="inboxDup_${esc(it.id)}" style="font-size:0.85em; color:#c0392b; font-weight:bold;"></div>
+                    <div style="display:flex; gap:6px; margin-top:6px;">
+                        <button type="button" onclick="openInboxItem('${esc(it.id)}')" style="margin:0; padding:6px 10px; background:#27ae60;">פתח לבדיקה ושמירה</button>
+                        <button type="button" onclick="dismissInboxItem('${esc(it.id)}')" style="margin:0; padding:6px 10px; background:#95a5a6;">התעלם</button>
+                    </div></div>`;
+            }
+            const seenTxt = Object.entries(inboxSeen).map(([k, t]) => {
+                const old = Date.now() - Date.parse(t) > 3 * 24 * 3600 * 1000;
+                return `<div style="font-size:0.75em; color:${old ? '#c0392b' : '#888'};">${old ? '⚠️ ' : ''}${esc(k)}: נבדק לאחרונה ${esc(new Date(t).toLocaleString('he-IL'))}${old ? ' - הסריקה כנראה נעצרה' : ''}</div>`;
+            }).join('');
+            html += seenTxt;
+            box.innerHTML = html;
+            inboxItems.forEach(it => inboxIsLikelyDup(it).then(d => { const el = document.getElementById('inboxDup_' + it.id); if (el && d) el.textContent = '⚠️ ייתכן שכבר קיימת במערכת'; }));
+        }
+        window.dismissInboxItem = async function(id) {
+            if (!await appConfirm("להתעלם מהמסמך הזה? הוא יוסר מהרשימה.")) return;
+            try { await setDoc(doc(inboxCol(), id), { status: 'dismissed', dismissedAt: new Date().toISOString() }, { merge: true }); }
+            catch (e) { alert("הפעולה נכשלה, נסה שוב."); }
+        };
+        window.openInboxItem = async function(id) {
+            const it = inboxItems.find(x => x.id === id);
+            if (!it) return;
+            try {
+                await fbAuth.authStateReady();
+                const tok = fbAuth.currentUser ? await fbAuth.currentUser.getIdToken() : '';
+                const r = await fetch(INBOX_FILE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok }, body: JSON.stringify({ id }) });
+                const j = await r.json();
+                if (!r.ok || !j.data) throw new Error(j.error || r.status);
+                const bin = atob(j.data); const u8 = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+                const file = new File([u8], j.filename || 'invoice', { type: j.mime || 'application/octet-stream' });
+                pendingInboxItem = it;
+                closeInboxModal();
+                window.scrollTo(0, 0);
+                await handleScanFiles({ target: { files: [file] } }, (it.fields && it.fields.docType === 'delivery_note') ? 'delivery' : 'invoice');
+            } catch (e) {
+                console.warn('open inbox item failed', e);
+                alert("לא הצלחתי לפתוח את המסמך. נסה שוב.");
+            }
+        };
+        // נקרא אחרי שמירה מוצלחת: מסמן את הפריט כטופל רק אם זה אכן המסמך שנפתח מהמייל
+        function markInboxDone(savedNumber, savedAmount) {
+            const it = pendingInboxItem;
+            if (!it) return;
+            const f = it.fields || {};
+            const sameNum = String(savedNumber || '').trim() && String(savedNumber).trim() === String(f.invoiceNumber || '').trim();
+            const sameAmt = Math.abs(Math.abs(Number(savedAmount) || 0) - Math.abs(Number(f.amount) || 0)) < 0.01 && (Number(f.amount) || 0) !== 0;
+            if (!sameNum && !sameAmt) return;
+            pendingInboxItem = null;
+            setDoc(doc(inboxCol(), it.id), { status: 'approved', approvedAt: new Date().toISOString() }, { merge: true }).catch(() => {});
+        }
+
         function initInvoicesModule() {
             const monthInput = document.getElementById('invoiceMonthSelect');
             if (monthInput) {
@@ -747,6 +869,7 @@
             const supplierSelectEl = document.getElementById('invoiceSupplierSelect');
             if (supplierSelectEl) supplierSelectEl.addEventListener('change', () => refreshPriceAlerts(false));
 
+            startInboxListener();
             onSnapshot(getSettingsDoc("suppliers_list"), (snap) => {
                 if (snap.exists() && Array.isArray(snap.data().suppliers)) {
                     suppliersList = snap.data().suppliers;
@@ -1359,6 +1482,7 @@
                     try { await updatePriceBook(supplier, items, noteDate, 'delivery_note'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
 
+                try { markInboxDone(noteNumber, amount); } catch (e) {}
                 document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
@@ -2639,6 +2763,7 @@
                 if (!isUpdate && amount > 0) {
                     try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
+                try { markInboxDone(invoiceNumber, amount); } catch (e) {}
                 document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];

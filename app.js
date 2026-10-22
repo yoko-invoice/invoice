@@ -2726,6 +2726,8 @@
                     id: invoiceId, docType: 'invoice', supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,
                     items: recognizedItemsList, handwrittenNotes: keptHandwrittenNotes()
                 };
+                // סימון מקור: חשבונית שנשמרה אחרי שנפתחה מתיבת המייל (להדפסה לרואה חשבון)
+                if (pendingInboxItem) invData.source = 'email';
                 if (!isUpdate) {
                     invData.createdAt = Date.now();
                     if (recognizedImageBase64) invData.pageCount = recognizedPageCount;
@@ -2764,6 +2766,7 @@
                     try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
                 try { markInboxDone(invoiceNumber, amount); } catch (e) {}
+                pendingInboxItem = null;   // גם אם הפריט לא סומן כטופל, הוא לא יסמן חשבונית עתידית בטעות
                 document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
@@ -3153,6 +3156,125 @@
                     <b>פירוט הרכישות והזיכויים:</b><br>
                     ${matchDetails.join('<br>')}
                 `;
+            }
+        };
+
+        // הדפסת חשבוניות שהגיעו מהמייל (אושרו ונשמרו) לרואה החשבון:
+        // פותח את חלון ההדפסה עם כל חשבוניות החודש מהמייל - עמוד A4 לכל חשבונית
+        // (מסמך רב-עמודי מתחלק לעמודים נפרדים), כותרת עם ספק, מספר, תאריך וסכום.
+        // בחלון ההדפסה בוחרים מדפסת או "שמירה כ-PDF" ושולחים לרואה החשבון.
+        // לא משתמש ב-canvas כי תמונות מ-Firebase Storage נחסמות ב-CORS - לכן DOM + window.print.
+        window.exportEmailInvoicesToPDF = async function() {
+            const emailInvs = monthlyInvoices
+                .filter(i => i.source === 'email')
+                .sort((a, b) => String(a.invoiceDate || '').localeCompare(String(b.invoiceDate || '')));
+            if (emailInvs.length === 0) {
+                alert("אין חשבוניות מהמייל בחודש זה. חשבוניות שתאשר ותשמור מהמייל יופיעו כאן.");
+                return;
+            }
+            const btn = document.getElementById('emailInvPdfBtn');
+            const origText = btn ? btn.innerText : '';
+            if (btn) btn.disabled = true;
+            const monthKey = getSelectedInvoiceMonth();
+            const monthNames = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+            const [yy, mm] = monthKey.split('-');
+            const monthTitle = `חודש: ${monthNames[parseInt(mm)-1]} ${yy}`;
+
+            const PAGE_W_MM = 180;        // רוחב התוכן בעמוד A4
+            const SLICE_H_MM = 240;       // גובה מקטע תמונה בעמוד המשך
+            const FIRST_SLICE_H_MM = 215; // המקטע הראשון קצר יותר - משאיר מקום לכותרת
+
+            let area = document.getElementById('emailPrintArea');
+            if (area) area.remove();
+            area = document.createElement('div');
+            area.id = 'emailPrintArea';
+
+            const waitImgs = [];
+            let noImgCount = 0;
+
+            const loadOne = (url) => new Promise((resolve) => {
+                const im = new Image();
+                im.onload = () => resolve({ w: im.naturalWidth, h: im.naturalHeight });
+                im.onerror = () => resolve(null);
+                setTimeout(() => resolve(null), 20000);
+                im.src = url;
+            });
+
+            for (let idx = 0; idx < emailInvs.length; idx++) {
+                const inv = emailInvs[idx];
+                if (btn) btn.innerText = `מכין להדפסה... ${idx + 1}/${emailInvs.length}`;
+                const amt = Number(inv.amount) || 0;
+                const isCredit = amt < 0;
+                const dateTxt = inv.invoiceDate ? inv.invoiceDate.split('-').reverse().join('/') : '-';
+                const headerHtml = `
+                    <div style="text-align:center; border-bottom:2px solid #2c3e50; padding-bottom:4mm; margin-bottom:6mm; font-family:Arial, sans-serif;">
+                        <div style="font-size:18pt; font-weight:bold;">חשבונית מהמייל - ${esc(inv.supplier || '')}</div>
+                        <div style="font-size:11pt; color:#555; margin-top:2mm;">
+                            מספר: <b>${esc(inv.invoiceNumber || '-')}</b>
+                            &nbsp;|&nbsp; תאריך: <b>${esc(dateTxt)}</b>
+                            &nbsp;|&nbsp; סכום: <b style="${isCredit ? 'color:red;' : ''}">${amt.toFixed(2)} \u20AA${isCredit ? ' (זיכוי)' : ''}</b>
+                        </div>
+                        <div style="font-size:9pt; color:#999; margin-top:1mm;">${monthTitle} | חשבונית ${idx + 1} מתוך ${emailInvs.length}</div>
+                    </div>`;
+
+                const dims = inv.imageUrl ? await loadOne(inv.imageUrl) : null;
+
+                if (!dims) {
+                    noImgCount++;
+                    const page = document.createElement('div');
+                    page.className = 'email-print-page';
+                    page.innerHTML = headerHtml + `<div style="padding:10mm; text-align:center; color:#888; border:1px dashed #bbb; font-family:Arial, sans-serif;">${inv.imageUrl ? 'לא הצלחתי לטעון את התמונה - אפשר לראות אותה בלחצן "תמונה" בטבלה.' : 'אין תמונה מצורפת לחשבונית זו.'}</div>`;
+                    area.appendChild(page);
+                    continue;
+                }
+
+                let imgW = PAGE_W_MM;
+                let dispH = dims.h / dims.w * imgW;   // גובה התמונה במ"מ ברוחב העמוד
+                // מסמך בגובה של עמוד אחד בערך: מכווצים מעט כדי שהכותרת והמסמך ייכנסו לאותו עמוד
+                if (dispH > FIRST_SLICE_H_MM && dispH <= FIRST_SLICE_H_MM * 1.2) {
+                    imgW = imgW * (FIRST_SLICE_H_MM / dispH);
+                    dispH = FIRST_SLICE_H_MM;
+                }
+                let consumed = 0, sliceIdx = 0;
+                while (consumed < dispH - 1) {
+                    const isFirst = sliceIdx === 0;
+                    const sliceH = Math.min(isFirst ? FIRST_SLICE_H_MM : SLICE_H_MM, dispH - consumed);
+                    const page = document.createElement('div');
+                    page.className = 'email-print-page';
+                    if (isFirst) page.innerHTML = headerHtml;
+                    const wrap = document.createElement('div');
+                    wrap.className = 'email-print-slice';
+                    wrap.style.cssText = `overflow:hidden; height:${sliceH}mm; text-align:center;`;
+                    const img = document.createElement('img');
+                    img.src = inv.imageUrl;
+                    img.style.cssText = `width:${imgW}mm; height:auto; display:inline-block; margin-top:-${consumed}mm;`;
+                    wrap.appendChild(img);
+                    page.appendChild(wrap);
+                    area.appendChild(page);
+                    waitImgs.push(img);
+                    consumed += sliceH;
+                    sliceIdx++;
+                }
+            }
+
+            document.body.appendChild(area);
+            const cleanup = () => {
+                const a = document.getElementById('emailPrintArea');
+                if (a) a.remove();
+                window.removeEventListener('afterprint', cleanup);
+                if (btn) { btn.disabled = false; btn.innerText = origText; }
+            };
+            window.addEventListener('afterprint', cleanup);
+
+            // ממתינים שכל התמונות ייטענו לפני פתיחת חלון ההדפסה
+            await Promise.all(waitImgs.map(i => i.complete ? Promise.resolve() : new Promise(r => { i.onload = r; i.onerror = r; setTimeout(r, 20000); })));
+            if (btn) { btn.disabled = false; btn.innerText = origText; }
+            try {
+                window.print();
+                if (noImgCount > 0) alert(`שים לב: ${noImgCount} חשבוניות הודפסו ככותרת בלבד (בלי תמונה).`);
+            } catch (e) {
+                cleanup();
+                alert("לא ניתן לפתוח את חלון ההדפסה.");
             }
         };
 

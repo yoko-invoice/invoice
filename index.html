@@ -93,12 +93,13 @@
                     <label>סוג המסמך:</label>
                     <select id="docTypeSelect" onchange="onDocTypeChange()">
                         <option value="invoice">🧾 חשבונית</option>
+                        <option value="income">💰 חשבונית הכנסה</option>
                         <option value="delivery">🚚 תעודת משלוח</option>
                     </select>
                     <div id="docTypeHint" style="font-size:0.75em; color:#16a085; margin-top:2px;"></div>
                 </div>
                 <div class="form-group">
-                    <label>ספק:</label>
+                    <label id="supplierLabel">ספק:</label>
                     <select id="invoiceSupplierSelect"></select>
                     <div id="supplierMatchHint" style="font-size:0.78em; margin-top:2px;"></div>
                 </div>
@@ -126,6 +127,7 @@
                         <option value="עמלה">עמלה</option>
                         <option value="צ'ק">צ'ק</option>
                         <option value="זיכוי">זיכוי</option>
+                        <option value="הכנסה">הכנסה - יועבר לרשימת ההכנסות</option>
                     </datalist>
                 </div>
                 <div class="form-group">
@@ -271,6 +273,39 @@
                         <tr><td colspan="7" style="color:#888;">טוען נתונים...</td></tr>
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <!-- חשבוניות הכנסה - נפרדות מדוח הספקים -->
+        <div class="card" id="incomeCard" style="border:2px solid #8e44ad;">
+            <h3 style="margin-top:0; color:#8e44ad;">💰 חשבוניות הכנסה</h3>
+            <p style="font-size:0.8em; color:#555; margin:-4px 0 8px 0;">נשמרות כאן בנפרד, לשמירה ולהדפסה. לא נכללות בדוח הספקים, בייצוא שלו ובגרפי ההוצאות. כדי לסווג חשבונית כהכנסה: בחרו "חשבונית הכנסה" בסוג המסמך, או כתבו "הכנסה" באמצעי התשלום.</p>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>לקוח</th>
+                            <th>מס' חשבונית</th>
+                            <th>סכום</th>
+                            <th>אמצעי תשלום</th>
+                            <th>הערות</th>
+                            <th>פעולות</th>
+                        </tr>
+                    </thead>
+                    <tbody id="incomeTableBody">
+                        <tr><td colspan="6" style="color:#888;">אין חשבוניות הכנסה לחודש זה.</td></tr>
+                    </tbody>
+                    <tfoot>
+                        <tr style="background:#f8f9fa; font-weight:bold;">
+                            <td>סה"כ הכנסות החודש</td>
+                            <td id="incomeTotalCell" style="color:#8e44ad;">0.00 ₪</td>
+                            <td colspan="4"></td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+            <div class="action-btns-group" style="margin-top:10px;">
+                <button class="pdf-btn" id="incomePdfBtn" onclick="exportIncomeToPDF()" style="background-color:#8e44ad;">🖨️ הדפס חשבוניות הכנסה לחודש זה</button>
             </div>
         </div>
 

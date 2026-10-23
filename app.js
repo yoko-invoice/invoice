@@ -3062,6 +3062,10 @@
             persistReportEdits(getSelectedInvoiceMonth());
         };
 
+        // חשבונית "חיצונית" - שולמה מחוץ לעסק (אמצעי התשלום מכיל "חיצוני"): נשמרת, נערכת ומודפסת כרגיל,
+        // אבל לא נספרת בסכומי דוח הספקים, בסיכום הספק ובגרפי ההוצאות.
+        const isExternalPayment = pm => String(pm || '').indexOf('חיצוני') !== -1;
+
         // בונה שורה לכל ספק ברשימה (גם בלי חשבוניות), ואחריהם ספקים שאינם ברשימה אך יש להם חשבוניות
         function buildReportRows() {
             const bySupplier = {};
@@ -3069,7 +3073,7 @@
                 if (!bySupplier[inv.supplier]) {
                     bySupplier[inv.supplier] = { amount: 0, methods: new Set(), notes: [] };
                 }
-                bySupplier[inv.supplier].amount += Number(inv.amount) || 0;
+                if (!isExternalPayment(inv.paymentMethod)) bySupplier[inv.supplier].amount += Number(inv.amount) || 0;   // חשבונית חיצונית לא נספרת בסכום הדוח
                 if (inv.paymentMethod) bySupplier[inv.supplier].methods.add(inv.paymentMethod);
                 if (inv.notes && inv.notes !== 'חשבונית זיכוי') bySupplier[inv.supplier].notes.push(inv.notes);
             });
@@ -3132,7 +3136,7 @@
 
             supplierInvoices.forEach(inv => {
                 const invAmt = Number(inv.amount) || 0;
-                totalAmount += invAmt;
+                if (!isExternalPayment(inv.paymentMethod)) totalAmount += invAmt;   // חשבונית חיצונית לא נספרת בסה"כ לתשלום
                 const isCredit = invAmt < 0;
 
                 if (Array.isArray(inv.items)) {
@@ -3608,7 +3612,7 @@
                 keys.forEach(k => byMonth[k] = 0);
                 snap.forEach(d => {
                     const x = d.data();
-                    if (!x || x.docType === 'delivery_note' || x.docType === 'income') return;   // תעודות משלוח וחשבוניות הכנסה לא נספרות כהוצאה
+                    if (!x || x.docType === 'delivery_note' || x.docType === 'income' || isExternalPayment(x.paymentMethod)) return;   // תעודות משלוח, חשבוניות הכנסה וחשבוניות חיצוניות לא נספרות כהוצאה
                     const a = Number(x.amount) || 0;
                     byMonth[x.monthKey] = (byMonth[x.monthKey] || 0) + a;
                     if (x.monthKey === sel) bySup[x.supplier] = (bySup[x.supplier] || 0) + a;

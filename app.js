@@ -293,6 +293,7 @@
 
         let suppliersList = DEFAULT_SUPPLIERS.slice();
         let monthlyInvoices = [];
+        let monthlyIncome = [];            // חשבוניות הכנסה של החודש הנבחר - נשמרות בנפרד, לא נכנסות לדוח הספקים/גרפים
         let recognizedImageBase64 = null;
         let recognizedItemsList = [];
         let editingInvoiceId = null;
@@ -1046,34 +1047,39 @@
 
         function applyDocTypeUI() {
             const isDelivery = (scanMode === 'delivery');
+            const isIncome = (scanMode === 'income');
             const typeSel = document.getElementById('docTypeSelect');
-            if (typeSel) typeSel.value = isDelivery ? 'delivery' : 'invoice';
+            if (typeSel) typeSel.value = isDelivery ? 'delivery' : (isIncome ? 'income' : 'invoice');
             const numberLabelEl = document.getElementById('numberLabel');
             const amountLabelEl = document.getElementById('amountLabel');
             const paymentGroupEl = document.getElementById('paymentGroup');
+            const supplierLabelEl = document.getElementById('supplierLabel');
             const formTitle = document.getElementById('confirmFormTitle');
             const saveBtn = document.getElementById('saveInvoiceBtn');
+            if (supplierLabelEl) supplierLabelEl.innerText = isIncome ? 'לקוח:' : 'ספק:';
             if (numberLabelEl) numberLabelEl.innerText = isDelivery ? 'מספר תעודת משלוח:' : 'מספר חשבונית / אסמכתא:';
-            if (amountLabelEl) amountLabelEl.innerText = isDelivery ? 'סכום התעודה (₪) - אם מופיע:' : 'סכום לתשלום (₪):';
+            if (amountLabelEl) amountLabelEl.innerText = isDelivery ? 'סכום התעודה (₪) - אם מופיע:' : (isIncome ? 'סכום החשבונית (₪):' : 'סכום לתשלום (₪):');
             if (paymentGroupEl) paymentGroupEl.classList.toggle('hidden', isDelivery);
+            const kindName = isDelivery ? 'תעודת משלוח' : (isIncome ? 'חשבונית הכנסה' : 'חשבונית');
             if (!editingInvoiceId) {
-                if (formTitle) formTitle.innerText = isDelivery ? 'אישור ואימות תעודת משלוח' : 'אישור ואימות חשבונית';
-                if (saveBtn) saveBtn.innerText = isDelivery ? 'שמור תעודה' : 'שמור חשבונית';
+                if (formTitle) formTitle.innerText = 'אישור ואימות ' + kindName;
+                if (saveBtn) saveBtn.innerText = 'שמור ' + kindName;
             } else {
-                if (formTitle) formTitle.innerText = isDelivery ? 'עריכת תעודת משלוח קיימת' : 'עריכת חשבונית קיימת';
-                if (saveBtn) saveBtn.innerText = isDelivery ? 'עדכן תעודה' : 'עדכן חשבונית';
+                if (formTitle) formTitle.innerText = 'עריכת ' + kindName + ' קיימת';
+                if (saveBtn) saveBtn.innerText = 'עדכן ' + kindName;
             }
         }
 
         window.onDocTypeChange = function() {
             const v = document.getElementById('docTypeSelect').value;
-            scanMode = (v === 'delivery') ? 'delivery' : 'invoice';
+            scanMode = (v === 'delivery') ? 'delivery' : (v === 'income' ? 'income' : 'invoice');
             const hint = document.getElementById('docTypeHint');
             if (hint) {
                 hint.innerText = '';
                 if (editingInvoiceId && editingOriginalKind && editingOriginalKind !== scanMode) {
                     hint.style.color = '#b9770e';
-                    hint.innerText = '⚠️ בשמירה המסמך יועבר ל' + (scanMode === 'delivery' ? 'תעודות המשלוח' : 'חשבוניות') + '.';
+                    const target = scanMode === 'delivery' ? 'תעודות המשלוח' : (scanMode === 'income' ? 'הכנסות' : 'חשבוניות הספקים');
+                    hint.innerText = '⚠️ בשמירה המסמך יועבר ל' + target + '.';
                 }
             }
             applyDocTypeUI();
@@ -1185,7 +1191,7 @@
                 const snap = await getDocs(q);
                 if (!snap.empty) {
                     const batch = writeBatch(db);
-                    snap.forEach(d => batch.update(d.ref, { supplier: newName }));
+                    snap.forEach(d => { if (d.data().docType !== 'income') batch.update(d.ref, { supplier: newName }); });
                     await batch.commit();
                 }
                 try { await renamePriceBookSupplier(oldName, newName); } catch (e) { console.warn("עדכון מחירון לשם הספק החדש נכשל:", e); }
@@ -1491,7 +1497,7 @@
                 pendingNewDocId = null;
                 scanMode = 'invoice';
                 if (!isUpdate) learnDateChoice(supplier, noteDate, scanMetaAtSave);
-                alert(isUpdate ? (editingOriginalKind === 'invoice' ? "החשבונית הומרה לתעודת משלוח בהצלחה!" : "התעודה עודכנה בהצלחה!") : "התעודה נשמרה בהצלחה!");
+                alert(isUpdate ? ((editingOriginalKind === 'invoice' || editingOriginalKind === 'income') ? "המסמך הומר לתעודת משלוח בהצלחה!" : "התעודה עודכנה בהצלחה!") : "התעודה נשמרה בהצלחה!");
                 if (monthKey !== selectedMonth) {
                     const monthEl = document.getElementById('invoiceMonthSelect');
                     if (monthEl) monthEl.value = monthKey;
@@ -2475,7 +2481,7 @@
                 typeHintEl.innerText = (!existingInvoice && autoDetectedDocType)
                     ? (autoDetectedDocType.conflict ? '⚠️ שתי קריאות נתנו סוג שונה - בדוק לפי הכותרת במסמך (חשבונית / תעודת משלוח).'
                         : (autoDetectedDocType.sure ? 'זוהה אוטומטית - אפשר לשנות אם טעה.' : 'לא בטוח בזיהוי - בדוק שהסוג נכון.'))
-                    : (existingInvoice ? 'אפשר להמיר בין חשבונית לתעודת משלוח - בשמירה המסמך יעבור לרשימה המתאימה.' : '');
+                    : (existingInvoice ? 'אפשר להמיר בין חשבונית, תעודת משלוח והכנסה - בשמירה המסמך יעבור לרשימה המתאימה.' : '');
                 if (!existingInvoice && currentScanMeta && currentScanMeta.docTypeNote) typeHintEl.innerText += ' ' + currentScanMeta.docTypeNote;
                 typeHintEl.style.color = (!existingInvoice && autoDetectedDocType && (autoDetectedDocType.conflict || !autoDetectedDocType.sure)) ? '#b9770e' : '#16a085';
             }
@@ -2493,9 +2499,10 @@
 
             if (existingInvoice) {
                 editingInvoiceId = existingInvoice.id;
-                editingOriginalKind = isDeliveryMode ? 'delivery' : 'invoice';
-                if (formTitle) formTitle.innerText = isDeliveryMode ? "עריכת תעודת משלוח קיימת" : "עריכת חשבונית קיימת";
-                if (saveBtn) saveBtn.innerText = isDeliveryMode ? "עדכן תעודה" : "עדכן חשבונית";
+                editingOriginalKind = isDeliveryMode ? 'delivery' : (scanMode === 'income' ? 'income' : 'invoice');
+                const editKindName = isDeliveryMode ? 'תעודת משלוח' : (scanMode === 'income' ? 'חשבונית הכנסה' : 'חשבונית');
+                if (formTitle) formTitle.innerText = "עריכת " + editKindName + " קיימת";
+                if (saveBtn) saveBtn.innerText = "עדכן " + editKindName;
                 imgWrap.innerHTML = existingInvoice.imageUrl
                     ? ((existingInvoice.pageCount || 1) > 1
                         ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openImageViewer('${esc(existingInvoice.imageUrl)}'); return false;"><img src="${esc(existingInvoice.imageUrl)}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${esc(existingInvoice.pageCount)} עמודים - גלול לצפייה</div>`
@@ -2506,6 +2513,13 @@
                 if (hintElEdit) hintElEdit.innerText = '';
                 lastRecognizedSupplierRaw = ''; lastRecognizedTaxId = '';
                 if (suppliersList.includes(existingInvoice.supplier)) {
+                    supplierSel.value = existingInvoice.supplier;
+                } else if (existingInvoice.supplier) {
+                    // שם שמקורו מחוץ לרשימת הספקים (למשל לקוח של חשבונית הכנסה) - מציגים אותו כדי שלא יאבד בעריכה
+                    const opt = document.createElement('option');
+                    opt.value = existingInvoice.supplier;
+                    opt.textContent = existingInvoice.supplier;
+                    supplierSel.appendChild(opt);
                     supplierSel.value = existingInvoice.supplier;
                 } else {
                     supplierSel.value = '__other__';
@@ -2519,8 +2533,9 @@
                 handwrittenNotesList = normalizeHandwrittenNotes(existingInvoice.handwrittenNotes);
             } else {
                 editingInvoiceId = null;
-                if (formTitle) formTitle.innerText = isDeliveryMode ? "אישור ואימות תעודת משלוח" : "אישור ואימות חשבונית";
-                if (saveBtn) saveBtn.innerText = isDeliveryMode ? "שמור תעודה" : "שמור חשבונית";
+                const newKindName = isDeliveryMode ? 'תעודת משלוח' : (scanMode === 'income' ? 'חשבונית הכנסה' : 'חשבונית');
+                if (formTitle) formTitle.innerText = "אישור ואימות " + newKindName;
+                if (saveBtn) saveBtn.innerText = "שמור " + newKindName;
 
                 renderScanPreviewWrap();
 
@@ -2556,7 +2571,7 @@
                 handwrittenNotesList = normalizeHandwrittenNotes(recognized && recognized.handwrittenNotes);
 
                 if (recognized) {
-                    const dupList = isDeliveryMode ? monthlyNotes : monthlyInvoices;
+                    const dupList = isDeliveryMode ? monthlyNotes : (scanMode === 'income' ? monthlyIncome : monthlyInvoices);
                     const isDuplicate = dupList.some(inv => isSameDocument(inv, recognized, isDeliveryMode));
 
                     if (isDuplicate) {
@@ -2594,9 +2609,9 @@
         }
 
         window.editInvoiceEntry = function(invoiceId) {
-            const inv = monthlyInvoices.find(i => i.id === invoiceId);
+            const inv = monthlyInvoices.find(i => i.id === invoiceId) || monthlyIncome.find(i => i.id === invoiceId);
             if (!inv) return;
-            scanMode = 'invoice';
+            scanMode = (inv.docType === 'income') ? 'income' : 'invoice';
             recognizedImageBase64 = null;
             currentScanMeta = null;
             openInvoiceConfirmForm(null, inv);
@@ -2668,17 +2683,20 @@
             const saveBtn = document.getElementById('saveInvoiceBtn');
             const supplierSel = document.getElementById('invoiceSupplierSelect');
             let supplier = supplierSel.value;
-            if (!supplier) { alert("אנא בחר ספק."); return; }
+            // חשבונית הכנסה: נבחרה במפורש בסוג המסמך, או שכתבו "הכנסה" בשדה אמצעי התשלום -
+            // נשמרת ברשימת ההכנסות הנפרדת ולא נכנסת לדוח הספקים החודשי.
+            const isIncome = (scanMode === 'income') || document.getElementById('invoicePaymentMethodInput').value.trim() === 'הכנסה';
+            if (!supplier) { alert(isIncome ? "אנא בחר לקוח." : "אנא בחר ספק."); return; }
             if (supplier === '__other__') {
-                const custom = await appPrompt("הקלד את שם הספק:");
-                if (!custom || !custom.trim()) { alert("אנא הכנס שם ספק."); return; }
+                const custom = await appPrompt(isIncome ? "הקלד את שם הלקוח:" : "הקלד את שם הספק:");
+                if (!custom || !custom.trim()) { alert(isIncome ? "אנא הכנס שם לקוח." : "אנא הכנס שם ספק."); return; }
                 supplier = custom.trim();
-                if (!suppliersList.includes(supplier)) {
+                if (!isIncome && !suppliersList.includes(supplier)) {
                     suppliersList.push(supplier);
                     try { await ackOrQueue(setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }), 8000, "רשימת ספקים"); } catch(e){ console.warn("שמירת רשימת ספקים נכשלה:", e); showToast("⚠️ שמירת רשימת הספקים נכשלה - נסה שוב.", "err"); }
                 }
             }
-            await learnSupplierAlias(supplier);
+            if (!isIncome) await learnSupplierAlias(supplier);
             const scanMetaAtSave = currentScanMeta;
 
             const invoiceNumber = document.getElementById('invoiceNumberInput').value.trim();
@@ -2704,15 +2722,15 @@
             // בדיקת כפילות אמיתית לפני שמירה בפועל - לא רק אזהרה חזותית, אלא חסימה שדורשת אישור מפורש
             if (!isUpdate) {
                 // בדיקת הכפילות מתבצעת מול החודש שאליו החשבונית תישמר בפועל
-                let compareList = monthlyInvoices;
+                let compareList = isIncome ? monthlyIncome : monthlyInvoices;
                 if (monthKey !== selectedMonth) {
                     try {
                         const snapCmp = await getDocs(query(getInvoicesCollection(), where("monthKey", "==", monthKey)));
-                        compareList = snapCmp.docs.map(d => d.data()).filter(x => x.docType !== 'delivery_note');
+                        compareList = snapCmp.docs.map(d => d.data()).filter(x => isIncome ? x.docType === 'income' : (x.docType !== 'delivery_note' && x.docType !== 'income'));
                     } catch (e) { compareList = []; }
                 }
                 const isDuplicate = compareList.some(inv => isSameDocument(inv, { supplier, invoiceNumber, invoiceDate, amount }, false));
-                if (isDuplicate && !await appConfirm(`⚠️ חשבונית דומה (ספק: ${supplier}, סכום: ${amount} ₪) כבר קיימת במערכת.\nלשמור בכל זאת?`)) {
+                if (isDuplicate && !await appConfirm(`⚠️ חשבונית דומה (${isIncome ? 'לקוח' : 'ספק'}: ${supplier}, סכום: ${amount} ₪) כבר קיימת במערכת.\nלשמור בכל זאת?`)) {
                     return;
                 }
             }
@@ -2723,7 +2741,7 @@
                 await scanPreviewPromise;   // ממתין שהתמונה תתאים לעמודים שסומנו
                 const invoiceId = docIdForSave();
                 const invData = {
-                    id: invoiceId, docType: 'invoice', supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,
+                    id: invoiceId, docType: isIncome ? 'income' : 'invoice', supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,
                     items: recognizedItemsList, handwrittenNotes: keptHandwrittenNotes()
                 };
                 // סימון מקור: חשבונית שנשמרה אחרי שנפתחה מתיבת המייל (להדפסה לרואה חשבון)
@@ -2732,7 +2750,7 @@
                     invData.createdAt = Date.now();
                     if (recognizedImageBase64) invData.pageCount = recognizedPageCount;
                     // התראות עליית מחיר נשמרות על החשבונית עצמה, לצורך כרטיס "שינויי מחיר החודש"
-                    if (amount > 0) {
+                    if (!isIncome && amount > 0) {
                         try { invData.priceAlerts = (await computePriceChanges(supplier, recognizedItemsList, invoiceDate)).ups; } catch (e) { /* לא קריטי */ }
                     }
                 } else {
@@ -2762,7 +2780,7 @@
                     20000,
                     "שמירת החשבונית"
                 );
-                if (!isUpdate && amount > 0) {
+                if (!isIncome && !isUpdate && amount > 0) {
                     try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
                 try { markInboxDone(invoiceNumber, amount); } catch (e) {}
@@ -2773,8 +2791,16 @@
                 handwrittenNotesList = [];
                 editingInvoiceId = null;
                 pendingNewDocId = null;
-                if (!isUpdate) learnDateChoice(supplier, invoiceDate, scanMetaAtSave);
-                alert(isUpdate ? (editingOriginalKind === 'delivery' ? "התעודה הומרה לחשבונית בהצלחה!" : "החשבונית עודכנה בהצלחה!") : "החשבונית נשמרה בהצלחה!");
+                if (!isIncome && !isUpdate) learnDateChoice(supplier, invoiceDate, scanMetaAtSave);
+                const savedKind = isIncome ? 'income' : 'invoice';
+                let saveMsg;
+                if (!isUpdate) saveMsg = isIncome ? "חשבונית ההכנסה נשמרה בהצלחה!" : "החשבונית נשמרה בהצלחה!";
+                else if (editingOriginalKind === 'delivery') saveMsg = "התעודה הומרה לחשבונית בהצלחה!";
+                else if (editingOriginalKind === 'income' && savedKind !== 'income') saveMsg = "חשבונית ההכנסה הומרה לחשבונית ספק בהצלחה!";
+                else if (editingOriginalKind !== 'income' && savedKind === 'income') saveMsg = "החשבונית הועברה לרשימת ההכנסות בהצלחה!";
+                else saveMsg = isIncome ? "חשבונית ההכנסה עודכנה בהצלחה!" : "החשבונית עודכנה בהצלחה!";
+                alert(saveMsg);
+                scanMode = 'invoice';
                 if (monthKey !== selectedMonth) {
                     const monthEl = document.getElementById('invoiceMonthSelect');
                     if (monthEl) monthEl.value = monthKey;
@@ -2784,7 +2810,7 @@
             } catch(e) {
                 alert("שגיאה בשמירת החשבונית: " + (e && e.message ? e.message : "שגיאה לא ידועה") + "\nניתן לנסות שוב.");
             } finally {
-                if (saveBtn) { saveBtn.disabled = false; saveBtn.innerText = isUpdate ? "עדכן חשבונית" : "שמור חשבונית"; }
+                if (saveBtn) { saveBtn.disabled = false; saveBtn.innerText = (isUpdate ? "עדכן " : "שמור ") + (isIncome ? "חשבונית הכנסה" : "חשבונית"); }
             }
         };
 
@@ -2844,6 +2870,34 @@
             }
         }
 
+        // טבלת חשבוניות ההכנסה של החודש - נפרדת מחשבוניות הספקים, כולל סכום חודשי
+        function renderIncomeRows() {
+            const tbody = document.getElementById('incomeTableBody');
+            if (!tbody) return;
+            if (monthlyIncome.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="color:#888;">אין חשבוניות הכנסה לחודש זה.</td></tr>';
+            } else {
+                tbody.innerHTML = monthlyIncome.map(inv => {
+                    const amt = Number(inv.amount) || 0;
+                    return `
+                        <tr>
+                            <td>${esc(inv.supplier)}</td>
+                            <td>${esc(inv.invoiceNumber || '-')}${inv.invoiceDate ? `<br><span style="font-size:0.8em; color:#777;">${esc(inv.invoiceDate.split('-').reverse().join('/'))}</span>` : ''}</td>
+                            <td>${amt.toFixed(2)} ₪</td>
+                            <td>${esc(inv.paymentMethod || '-')}</td>
+                            <td>${esc(inv.notes || '-')}</td>
+                            <td style="white-space:nowrap;">
+                                ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : ''}
+                                <button class="edit-btn" data-id="${esc(inv.id)}" onclick="editInvoiceEntry(this.dataset.id)">ערוך</button>
+                                <button class="delete-btn" data-id="${esc(inv.id)}" onclick="deleteInvoiceEntry(this.dataset.id)">מחק</button>
+                            </td>
+                        </tr>`;
+                }).join('');
+            }
+            const totalEl = document.getElementById('incomeTotalCell');
+            if (totalEl) totalEl.innerText = monthlyIncome.reduce((s, i) => s + (Number(i.amount) || 0), 0).toFixed(2) + ' ₪';
+        }
+
         window.loadInvoicesForMonth = async function() {
             const monthKey = getSelectedInvoiceMonth();
             if (invoicesShownMonth !== monthKey) { invoicesShown = 10; invoicesShownMonth = monthKey; }
@@ -2855,12 +2909,16 @@
                 const snap = await getDocs(q);
                 monthlyInvoices = [];
                 monthlyNotes = [];
+                monthlyIncome = [];
                 snap.forEach(d => {
                     let data = d.data();
                     if (data.notes === 'חשבונית זיכוי') data.notes = ''; 
-                    if (data.docType === 'delivery_note') monthlyNotes.push(data); else monthlyInvoices.push(data);
+                    if (data.docType === 'delivery_note') monthlyNotes.push(data);
+                    else if (data.docType === 'income') monthlyIncome.push(data);
+                    else monthlyInvoices.push(data);
                 });
                 monthlyInvoices.sort((a, b) => (a.supplier || '').localeCompare(b.supplier || '', 'he'));
+                monthlyIncome.sort((a, b) => (a.supplier || '').localeCompare(b.supplier || '', 'he') || String(a.invoiceDate || '').localeCompare(String(b.invoiceDate || '')));
 
                 try {
                     const editsSnap = await getDoc(getReportEditsDoc(monthKey));
@@ -2871,6 +2929,7 @@
                 renderEditableReportTable();
                 renderPriceAlertsCard();
                 renderDeliveryNotes();
+                renderIncomeRows();
 
                 if (monthlyInvoices.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="7" style="color:#888;">אין חשבוניות רשומות לחודש זה.</td></tr>';
@@ -3279,6 +3338,123 @@
             }
         };
 
+        // הדפסת חשבוניות ההכנסה של החודש (מכל מקור - מייל או צילום) לרואה החשבון:
+        // אותו מנגנון של הדפסת חשבוניות המייל - עמוד A4 לכל מסמך, כותרת עם לקוח, מספר, תאריך וסכום.
+        window.exportIncomeToPDF = async function() {
+            const emailInvs = monthlyIncome
+                .slice()
+                .sort((a, b) => String(a.invoiceDate || '').localeCompare(String(b.invoiceDate || '')));
+            if (emailInvs.length === 0) {
+                // הודעה בתוך הדף ולא alert - בחלק מהמכשירים alert באפליקציה מותקנת מציג דף לבן
+                showToast("אין חשבוניות הכנסה בחודש זה.", "err");
+                return;
+            }
+            const btn = document.getElementById('incomePdfBtn');
+            const origText = btn ? btn.innerText : '';
+            if (btn) btn.disabled = true;
+            const monthKey = getSelectedInvoiceMonth();
+            const monthNames = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+            const [yy, mm] = monthKey.split('-');
+            const monthTitle = `חודש: ${monthNames[parseInt(mm)-1]} ${yy}`;
+
+            const PAGE_W_MM = 180;        // רוחב התוכן בעמוד A4
+            const SLICE_H_MM = 240;       // גובה מקטע תמונה בעמוד המשך
+            const FIRST_SLICE_H_MM = 215; // המקטע הראשון קצר יותר - משאיר מקום לכותרת
+
+            let area = document.getElementById('emailPrintArea');
+            if (area) area.remove();
+            area = document.createElement('div');
+            area.id = 'emailPrintArea';
+
+            const waitImgs = [];
+            let noImgCount = 0;
+
+            const loadOne = (url) => new Promise((resolve) => {
+                const im = new Image();
+                im.onload = () => resolve({ w: im.naturalWidth, h: im.naturalHeight });
+                im.onerror = () => resolve(null);
+                setTimeout(() => resolve(null), 20000);
+                im.src = url;
+            });
+
+            for (let idx = 0; idx < emailInvs.length; idx++) {
+                const inv = emailInvs[idx];
+                if (btn) btn.innerText = `מכין להדפסה... ${idx + 1}/${emailInvs.length}`;
+                const amt = Number(inv.amount) || 0;
+                const isCredit = amt < 0;
+                const dateTxt = inv.invoiceDate ? inv.invoiceDate.split('-').reverse().join('/') : '-';
+                const headerHtml = `
+                    <div style="text-align:center; border-bottom:2px solid #2c3e50; padding-bottom:4mm; margin-bottom:6mm; font-family:Arial, sans-serif;">
+                        <div style="font-size:18pt; font-weight:bold;">חשבונית הכנסה - ${esc(inv.supplier || '')}</div>
+                        <div style="font-size:11pt; color:#555; margin-top:2mm;">
+                            מספר: <b>${esc(inv.invoiceNumber || '-')}</b>
+                            &nbsp;|&nbsp; תאריך: <b>${esc(dateTxt)}</b>
+                            &nbsp;|&nbsp; סכום: <b style="${isCredit ? 'color:red;' : ''}">${amt.toFixed(2)} \u20AA${isCredit ? ' (זיכוי)' : ''}</b>
+                        </div>
+                        <div style="font-size:9pt; color:#999; margin-top:1mm;">${monthTitle} | חשבונית ${idx + 1} מתוך ${emailInvs.length}</div>
+                    </div>`;
+
+                const dims = inv.imageUrl ? await loadOne(inv.imageUrl) : null;
+
+                if (!dims) {
+                    noImgCount++;
+                    const page = document.createElement('div');
+                    page.className = 'email-print-page';
+                    page.innerHTML = headerHtml + `<div style="padding:10mm; text-align:center; color:#888; border:1px dashed #bbb; font-family:Arial, sans-serif;">${inv.imageUrl ? 'לא הצלחתי לטעון את התמונה - אפשר לראות אותה בלחצן "תמונה" בטבלה.' : 'אין תמונה מצורפת לחשבונית זו.'}</div>`;
+                    area.appendChild(page);
+                    continue;
+                }
+
+                let imgW = PAGE_W_MM;
+                let dispH = dims.h / dims.w * imgW;   // גובה התמונה במ"מ ברוחב העמוד
+                // מסמך בגובה של עמוד אחד בערך: מכווצים מעט כדי שהכותרת והמסמך ייכנסו לאותו עמוד
+                if (dispH > FIRST_SLICE_H_MM && dispH <= FIRST_SLICE_H_MM * 1.2) {
+                    imgW = imgW * (FIRST_SLICE_H_MM / dispH);
+                    dispH = FIRST_SLICE_H_MM;
+                }
+                let consumed = 0, sliceIdx = 0;
+                while (consumed < dispH - 1) {
+                    const isFirst = sliceIdx === 0;
+                    const sliceH = Math.min(isFirst ? FIRST_SLICE_H_MM : SLICE_H_MM, dispH - consumed);
+                    const page = document.createElement('div');
+                    page.className = 'email-print-page';
+                    if (isFirst) page.innerHTML = headerHtml;
+                    const wrap = document.createElement('div');
+                    wrap.className = 'email-print-slice';
+                    wrap.style.cssText = `overflow:hidden; height:${sliceH}mm; text-align:center;`;
+                    const img = document.createElement('img');
+                    img.src = inv.imageUrl;
+                    img.style.cssText = `width:${imgW}mm; height:auto; display:inline-block; margin-top:-${consumed}mm;`;
+                    wrap.appendChild(img);
+                    page.appendChild(wrap);
+                    area.appendChild(page);
+                    waitImgs.push(img);
+                    consumed += sliceH;
+                    sliceIdx++;
+                }
+            }
+
+            document.body.appendChild(area);
+            const cleanup = () => {
+                const a = document.getElementById('emailPrintArea');
+                if (a) a.remove();
+                window.removeEventListener('afterprint', cleanup);
+                if (btn) { btn.disabled = false; btn.innerText = origText; }
+            };
+            window.addEventListener('afterprint', cleanup);
+
+            // ממתינים שכל התמונות ייטענו לפני פתיחת חלון ההדפסה
+            await Promise.all(waitImgs.map(i => i.complete ? Promise.resolve() : new Promise(r => { i.onload = r; i.onerror = r; setTimeout(r, 20000); })));
+            if (btn) { btn.disabled = false; btn.innerText = origText; }
+            try {
+                window.print();
+                if (noImgCount > 0) showToast(`שים לב: ${noImgCount} חשבוניות הכנסה הודפסו ככותרת בלבד (בלי תמונה).`, "err");
+            } catch (e) {
+                cleanup();
+                showToast("לא ניתן לפתוח את חלון ההדפסה.", "err");
+            }
+        };
+
         window.exportInvoicesToPDF = async function() {
             const { rows, total, hasCommission, totalWithoutCommission, totalWithCommission } = getFinalReportData();
             if (rows.length === 0) { alert("אין נתונים לדוח לחודש זה."); return; }
@@ -3417,7 +3593,7 @@
                 keys.forEach(k => byMonth[k] = 0);
                 snap.forEach(d => {
                     const x = d.data();
-                    if (!x || x.docType === 'delivery_note') return;   // תעודות משלוח לא נספרות כהוצאה
+                    if (!x || x.docType === 'delivery_note' || x.docType === 'income') return;   // תעודות משלוח וחשבוניות הכנסה לא נספרות כהוצאה
                     const a = Number(x.amount) || 0;
                     byMonth[x.monthKey] = (byMonth[x.monthKey] || 0) + a;
                     if (x.monthKey === sel) bySup[x.supplier] = (bySup[x.supplier] || 0) + a;

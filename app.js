@@ -734,6 +734,7 @@
         // ---- חשבוניות שהגיעו מהמייל (טיוטות לאישור) ----
         const INBOX_FILE_URL = "https://invoiceinboxfile-vngzfxix3a-uc.a.run.app";
         let inboxItems = [], inboxSeen = {}, inboxListenerOn = false, pendingInboxItem = null, inboxDupCache = {};
+        let returnToInboxAfterForm = false;   // נפתח מסמך מהמייל: בסגירת הטופס חוזרים לרשימת החשבוניות מהמייל
         function inboxCol() { return collection(db, `${RESTAURANT_ID}_inbox`); }
         function startInboxListener() {
             if (inboxListenerOn) return;
@@ -774,6 +775,13 @@
             renderInboxModal();
         };
         window.closeInboxModal = function() { const m = document.getElementById('inboxModal'); if (m) m.remove(); };
+        // נקרא כשטופס האישור נסגר (שמירה או ביטול): אם הגענו מהמייל, חוזרים לרשימה במקום להיכנס מחדש
+        function reopenInboxIfNeeded() {
+            if (!returnToInboxAfterForm) return;
+            returnToInboxAfterForm = false;
+            pendingInboxItem = null;
+            openInboxModal();
+        }
         function inboxIsLikelyDup(it) {
             const f = it.fields || {};
             const num = String(f.invoiceNumber || '').trim();
@@ -833,11 +841,15 @@
                 for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
                 const file = new File([u8], j.filename || 'invoice', { type: j.mime || 'application/octet-stream' });
                 pendingInboxItem = it;
+                returnToInboxAfterForm = true;
                 closeInboxModal();
                 window.scrollTo(0, 0);
                 await handleScanFiles({ target: { files: [file] } }, (it.fields && it.fields.docType === 'delivery_note') ? 'delivery' : 'invoice');
             } catch (e) {
                 console.warn('open inbox item failed', e);
+                returnToInboxAfterForm = false;
+                pendingInboxItem = null;
+                openInboxModal();
                 alert("לא הצלחתי לפתוח את המסמך. נסה שוב.");
             }
         };
@@ -1490,6 +1502,7 @@
 
                 try { markInboxDone(noteNumber, amount); } catch (e) {}
                 document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
+                reopenInboxIfNeeded();
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
@@ -2671,6 +2684,7 @@
             currentScanMeta = null;
             handwrittenNotesList = [];
             renderHandwrittenBox();
+            reopenInboxIfNeeded();
         };
 
         function makeInvoiceId() {
@@ -2786,6 +2800,7 @@
                 try { markInboxDone(invoiceNumber, amount); } catch (e) {}
                 pendingInboxItem = null;   // גם אם הפריט לא סומן כטופל, הוא לא יסמן חשבונית עתידית בטעות
                 document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
+                reopenInboxIfNeeded();
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
                 handwrittenNotesList = [];

@@ -1,4 +1,4 @@
-const CACHE = 'invoices-v23';
+const CACHE = 'invoices-v24';
 
 // קבצי האפליקציה (חובה לעבודה אופליין)
 const CORE = [

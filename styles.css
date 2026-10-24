@@ -83,7 +83,7 @@
         #imgViewerOverlay .iv-close { margin: 0; width: auto; padding: 8px 18px; background: #7f8c8d; color: #fff; border: none; border-radius: 8px; font-size: 1em; }
         #imgViewerOverlay .iv-body { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; text-align: center; overscroll-behavior: contain; }
         /* touch-action: pinch-zoom לבדו חסם גלילה באצבע אחת - לכן לא ניתן היה לגלול לעמודים הבאים */
-        #imgViewerOverlay .iv-body img { max-width: 100%; height: auto; display: block; margin: 0 auto; touch-action: pan-x pan-y pinch-zoom; }
+        #imgViewerOverlay .iv-body img { max-width: 100%; height: auto; display: block; margin: 0 auto; touch-action: pan-x pan-y; }
 
         /* מודאל חיתוך ידני */
         #cropModalOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 10003; display: flex; flex-direction: column; }

@@ -384,7 +384,11 @@
             Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'contain', background: '#000' });
             video.style.opacity = '0';
             overlay.classList.remove('hidden');
-            const tbOpen = document.getElementById('cameraTorchBtn'); if (tbOpen) { tbOpen.onclick = null; tbOpen.style.visibility = 'hidden'; tbOpen.textContent = '🔦 פנס'; }
+            // כפתור הפנס מוצג מיד עם שאר הכפתורים במצב "בדיקה" (מעומעם ומנוטרל) - כך שהוא לא
+            // "קופץ פנימה" חצי שנייה אחרי שהמצלמה נפתחת. אם מתברר שאין פנס במכשיר - מוסתר
+            // (המקום נשמר בכל מקרה עם visibility, כך ששום דבר לא זז).
+            const tbOpen = document.getElementById('cameraTorchBtn');
+            if (tbOpen) { tbOpen.onclick = null; tbOpen.disabled = true; tbOpen.style.opacity = '0.45'; tbOpen.style.visibility = 'visible'; tbOpen.textContent = '🔦 פנס'; }
             const gen = ++cameraOpenGen;
             // שמירת זמן: בדפדפנים פנימיים של אפליקציות (קישור שנפתח בתוך וואטסאפ וכו') בקשת הרשאת
             // המצלמה עלולה "להיתקע" בלי חלון אישור ובלי שגיאה - והמשתמש רואה מסך שחור לנצח.
@@ -427,12 +431,14 @@
             }
         };
 
-        // כפתור הפנס קיים ב-HTML מהרגע הראשון עם visibility:hidden - המקום שמור תמיד,
-        // כך שהכפתורים לא קופצים כשזיהוי התמיכה מסתיים (או אם אין פנס במכשיר).
+        // כפתור הפנס מוצג מרגע פתיחת המצלמה (מעומעם ומנוטרל); כאן, אחרי זיהוי היכולות,
+        // הוא הופך פעיל אם יש פנס - או מוסתר אם אין (המקום נשמר תמיד, כך שהכפתורים לא זזים).
         function setupTorchButton(trk, caps) {
             const b = document.getElementById('cameraTorchBtn');
             if (!b) return;
             b.onclick = null;
+            b.disabled = false;
+            b.style.opacity = '';
             b.textContent = '🔦 פנס';
             if (!caps || !caps.torch) { b.style.visibility = 'hidden'; return; }
             let on = false;
@@ -445,7 +451,7 @@
 
         window.closeCameraModal = function() {
             cameraOpenGen++;   // מבטל פתיחה שעוד ממתינה להרשאה - הזרם ייסגר כשיגיע
-            const tb = document.getElementById('cameraTorchBtn'); if (tb) { tb.onclick = null; tb.style.visibility = 'hidden'; tb.textContent = '🔦 פנס'; }
+            const tb = document.getElementById('cameraTorchBtn'); if (tb) { tb.onclick = null; tb.disabled = false; tb.style.opacity = ''; tb.style.visibility = 'hidden'; tb.textContent = '🔦 פנס'; }
             const overlay = document.getElementById('cameraModalOverlay');
             const video = document.getElementById('cameraModalVideo');
             overlay.classList.add('hidden');
@@ -2591,7 +2597,9 @@
         function cropCanvasPos(ev) {
             const canvas = document.getElementById('cropModalCanvas');
             const r = canvas.getBoundingClientRect();
-            return [ev.clientX - r.left, ev.clientY - r.top];
+            // אם ה-CSS מכווץ את הקנבס על המסך (max-width/max-height), מתרגמים לקואורדינטות הקנבס האמיתיות
+            const sx = canvas.width / (r.width || 1), sy = canvas.height / (r.height || 1);
+            return [(ev.clientX - r.left) * sx, (ev.clientY - r.top) * sy];
         }
 
         function bindCropCanvasEvents() {
@@ -2618,20 +2626,52 @@
             canvas.addEventListener('pointercancel', drop);
         }
 
+        // טוען תמונה לקנבס החיתוך. התמונה השמורה מוצגת במסך העריכה גם בלי CORS, אבל לחיתוך
+        // (ציור על קנבס וקריאת פיקסלים) חייבים תמונה "נקייה". לכן טוענים קודם ב-fetch עם
+        // cache-bust ייחודי + no-store: בקשה טרייה לגמרי, שלא תלויה במה שיש במטמון הדפדפן
+        // (טעינת <img> רגילה במסך העריכה שומרת את התמונה במטמון בלי מצב CORS, ובחלק מהמכשירים
+        // אותה רשומת מטמון מפילה את טעינת ה-CORS של החיתוך). את ה-blob הורד הופכים ל-objectURL
+        // מקומי - same-origin, כך שהקנבס אף פעם לא "נכתם". אם ה-fetch נכשל, ניסיון גיבוי:
+        // טעינת <img crossOrigin> רגילה על אותה כתובת עם ה-cache-bust.
+        async function loadSavedImageForCrop(url) {
+            const bust = url + (url.includes('?') ? '&' : '?') + 'cropcb=' + Date.now();
+            try {
+                const r = await fetch(bust, { mode: 'cors', credentials: 'omit', cache: 'no-store' });
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const blob = await r.blob();
+                if (!blob.size) throw new Error('empty response');
+                return await loadCropImgEl(URL.createObjectURL(blob));
+            } catch (e) {
+                console.warn('crop image fetch failed, falling back to <img crossOrigin>', e);
+            }
+            return loadCropImgEl(bust, 'anonymous');
+        }
+
+        function loadCropImgEl(src, cors) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                if (cors) img.crossOrigin = cors;
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error('image element load failed'));
+                img.src = src;
+            });
+        }
+
         window.openManualCrop = function() {
             // מסך עריכה של מסמך קיים: החיתוך חל על התמונה השמורה ב-Storage.
             // crossOrigin נדרש כדי שאפשר יהיה לצייר את התמונה על קנבס ולקרוא פיקסלים.
             if (editCropInvoice && editCropInvoice.imageUrl) {
-                const img = new Image();
-                img.crossOrigin = 'anonymous';
-                img.onload = () => {
-                    cropState = { img, mode: 'edit', pageIdx: -1, quad: null, dragIdx: null, scale: 1 };
-                    document.getElementById('cropModalOverlay').classList.remove('hidden');
-                    bindCropCanvasEvents();
-                    layoutCropCanvas();
-                };
-                img.onerror = () => alert('לא הצלחתי לטעון את התמונה השמורה לחיתוך.');
-                img.src = editCropInvoice.imageUrl;
+                loadSavedImageForCrop(editCropInvoice.imageUrl)
+                    .then((img) => {
+                        cropState = { img, mode: 'edit', pageIdx: -1, quad: null, dragIdx: null, scale: 1 };
+                        document.getElementById('cropModalOverlay').classList.remove('hidden');
+                        bindCropCanvasEvents();
+                        layoutCropCanvas();
+                    })
+                    .catch((err) => {
+                        console.warn('saved crop image load failed', err);
+                        alert('לא הצלחתי לטעון את התמונה השמורה לחיתוך. בדוק חיבור ונסה שוב.');
+                    });
                 return;
             }
             if (!recognizedImageBase64) return;

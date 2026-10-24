@@ -339,6 +339,7 @@
 
         // ---- מודאל מצלמה חיה (getUserMedia) ----
         let cameraStream = null;
+        let cameraOpenGen = 0;   // מונה פתיחות - מונע דליפת מצלמה אם המשתמש ביטל בזמן שההרשאה עוד ממתינה
 
         
         // פותח מצלמה ומנסה לקבל פריים לאורך (גובה > רוחב) כשהמסך לאורך — אחרת המצלמה נותנת פריים לרוחב עם פסים שחורים
@@ -383,8 +384,22 @@
             Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'contain', background: '#000' });
             video.style.opacity = '0';
             overlay.classList.remove('hidden');
+            const tbOpen = document.getElementById('cameraTorchBtn'); if (tbOpen) { tbOpen.onclick = null; tbOpen.style.visibility = 'hidden'; tbOpen.textContent = '🔦 פנס'; }
+            const gen = ++cameraOpenGen;
+            // שמירת זמן: בדפדפנים פנימיים של אפליקציות (קישור שנפתח בתוך וואטסאפ וכו') בקשת הרשאת
+            // המצלמה עלולה "להיתקע" בלי חלון אישור ובלי שגיאה - והמשתמש רואה מסך שחור לנצח.
+            // אחרי כמה שניות מציגים הנחיה ברורה; אם המצלמה מסתדרת להיפתח (אישור איטי) - ההודעה נעלמת.
+            const slowTimer = setTimeout(() => {
+                errorBox.innerText = "המצלמה לא נפתחת... אם נכנסת דרך קישור בתוך וואטסאפ או אפליקציה אחרת - המצלמה חסומה שם. סגור ופתח את האפליקציה מהסמל במסך הבית או בדפדפן כרום.";
+                errorBox.classList.remove('hidden');
+            }, 6000);
             try {
-                cameraStream = await openPortraitStream();
+                const s = await openPortraitStream();
+                clearTimeout(slowTimer);
+                if (gen !== cameraOpenGen) { try { s.getTracks().forEach(t => t.stop()); } catch (e) {} return; }   // המשתמש כבר ביטל
+                errorBox.classList.add('hidden');
+                errorBox.innerText = '';
+                cameraStream = s;
                 // זום מינימלי (אם המכשיר תומך, לפעמים זה עדשה רחבה) — כדי שלא יהיה צורך להתרחק
                 try {
                     const trk = cameraStream.getVideoTracks()[0];
@@ -405,31 +420,32 @@
                 video.srcObject = cameraStream;
                 try { await video.play(); } catch (e) { /* autoplay מטפל בזה */ }
             } catch (err) {
-                errorBox.innerText = "לא ניתן לפתוח את המצלמה: " + err.message + " (ודא שהאפליקציה קיבלה הרשאת מצלמה)";
+                clearTimeout(slowTimer);
+                if (gen !== cameraOpenGen) return;   // המשתמש כבר ביטל
+                errorBox.innerText = "לא ניתן לפתוח את המצלמה: " + err.message + " (ודא שהאפליקציה קיבלה הרשאת מצלמה. אם נכנסת דרך קישור בתוך וואטסאפ - פתח מהסמל במסך הבית או בכרום.)";
                 errorBox.classList.remove('hidden');
             }
         };
 
+        // כפתור הפנס קיים ב-HTML מהרגע הראשון עם visibility:hidden - המקום שמור תמיד,
+        // כך שהכפתורים לא קופצים כשזיהוי התמיכה מסתיים (או אם אין פנס במכשיר).
         function setupTorchButton(trk, caps) {
-            const old = document.getElementById('cameraTorchBtn');
-            if (old) old.remove();
-            if (!caps || !caps.torch) return;
-            const ctl = document.getElementById('cameraModalControls');
-            if (!ctl) return;
-            const b = document.createElement('button');
-            b.id = 'cameraTorchBtn'; b.type = 'button'; b.textContent = '🔦 פנס';
-            b.style.cssText = 'background-color:#f39c12;';
+            const b = document.getElementById('cameraTorchBtn');
+            if (!b) return;
+            b.onclick = null;
+            b.textContent = '🔦 פנס';
+            if (!caps || !caps.torch) { b.style.visibility = 'hidden'; return; }
             let on = false;
             b.onclick = async () => {
                 try { on = !on; await trk.applyConstraints({ advanced: [{ torch: on }] }); b.textContent = on ? '🔦 כבה' : '🔦 פנס'; }
                 catch (e) { on = false; }
             };
-            // סדר ב-RTL: צלם מימין, פנס במרכז, ביטול משמאל — מכניסים אחרי כפתור הצילום
-            ctl.insertBefore(b, ctl.children[1] || null);
+            b.style.visibility = 'visible';
         }
 
         window.closeCameraModal = function() {
-            const tb = document.getElementById('cameraTorchBtn'); if (tb) tb.remove();
+            cameraOpenGen++;   // מבטל פתיחה שעוד ממתינה להרשאה - הזרם ייסגר כשיגיע
+            const tb = document.getElementById('cameraTorchBtn'); if (tb) { tb.onclick = null; tb.style.visibility = 'hidden'; tb.textContent = '🔦 פנס'; }
             const overlay = document.getElementById('cameraModalOverlay');
             const video = document.getElementById('cameraModalVideo');
             overlay.classList.add('hidden');
@@ -1548,6 +1564,7 @@
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
                 editingInvoiceId = null;
+                editCropInvoice = null;
                 pendingNewDocId = null;
                 scanMode = 'invoice';
                 if (!isUpdate) learnDateChoice(supplier, noteDate, scanMetaAtSave);
@@ -2520,7 +2537,8 @@
         // ---- חיתוך ידני: סימון 4 פינות על התמונה הסרוקה, גזירה ויישור פרספקטיבה ----
         // fallback לכשהחיתוך האוטומטי לא מצליח (רקע בהיר הדומה לנייר). הגזירה תמיד לפי סימון
         // המשתמש בלבד - אין כאן זיהוי אוטומטי שעלול לגזור תוכן בטעות.
-        let cropState = null;   // { img, mode:'page'|'preview', pageIdx, scale, quad:[[x,y]x4] בקואורדינטות הקנבס, dragIdx }
+        let cropState = null;   // { img, mode:'page'|'preview'|'edit', pageIdx, scale, quad:[[x,y]x4] בקואורדינטות הקנבס, dragIdx }
+        let editCropInvoice = null;   // חשבונית קיימת בעריכה - החיתוך הידני חל על התמונה השמורה שלה ומעלה אותה מחדש
 
         function defaultCropQuad(w, h) {
             const mx = w * 0.08, my = h * 0.06;
@@ -2601,6 +2619,21 @@
         }
 
         window.openManualCrop = function() {
+            // מסך עריכה של מסמך קיים: החיתוך חל על התמונה השמורה ב-Storage.
+            // crossOrigin נדרש כדי שאפשר יהיה לצייר את התמונה על קנבס ולקרוא פיקסלים.
+            if (editCropInvoice && editCropInvoice.imageUrl) {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => {
+                    cropState = { img, mode: 'edit', pageIdx: -1, quad: null, dragIdx: null, scale: 1 };
+                    document.getElementById('cropModalOverlay').classList.remove('hidden');
+                    bindCropCanvasEvents();
+                    layoutCropCanvas();
+                };
+                img.onerror = () => alert('לא הצלחתי לטעון את התמונה השמורה לחיתוך.');
+                img.src = editCropInvoice.imageUrl;
+                return;
+            }
             if (!recognizedImageBase64) return;
             // עמוד בודד נבחר: החיתוך חל על העמוד עצמו (שריד גם אם משנים סימון עמודים אחר כך).
             // כמה עמודים: החיתוך חל על תמונת התצוגה המאוחדת (זו התמונה שנשמרת).
@@ -2665,6 +2698,31 @@
                     closeManualCrop();
                     scanPreviewPromise = rebuildScanPreview();
                     renderPageSelector();
+                } else if (st.mode === 'edit') {
+                    // מסמך קיים: מעלים את התמונה החתוכה לאותו נתיב ב-Storage ומעדכנים את imageUrl במסמך
+                    const okBtn = document.querySelector('#cropModalOverlay .crop-ok');
+                    if (okBtn) { okBtn.disabled = true; okBtn.innerText = 'מעלה...'; }
+                    try {
+                        const id = editingInvoiceId;
+                        if (!id) throw new Error('no invoice in edit');
+                        const fileName = (editingOriginalKind === 'delivery' ? 'dn_' + id : id) + '.jpg';
+                        const imgRef = storageRef(storage, `${RESTAURANT_ID}/invoices/${fileName}`);
+                        await withTimeout(uploadString(imgRef, dataUrl, 'data_url', { cacheControl: 'no-cache' }), 30000, "העלאת תמונה");
+                        const imageUrl = await withTimeout(getDownloadURL(imgRef), 15000, "קבלת קישור לתמונה");
+                        await ackOrQueue(setDoc(doc(getInvoicesCollection(), id), { imageUrl, updatedAt: Date.now() }, { merge: true }), 20000, "עדכון התמונה");
+                        if (editCropInvoice) editCropInvoice.imageUrl = imageUrl;
+                        // אם סוג המסמך הומר מתישהו, ייתכן שהתמונה הישנה ישבה בנתיב של הסוג הקודם - מנקים אותה
+                        try { await deleteObject(storageRef(storage, `${RESTAURANT_ID}/invoices/${(editingOriginalKind === 'delivery' ? id : 'dn_' + id)}.jpg`)); } catch (e) { /* לא קריטי */ }
+                        closeManualCrop();
+                        renderEditImageWrap(editCropInvoice, true);
+                        showToast('התמונה נחתכה ועודכנה ✓', 'ok');
+                        loadInvoicesForMonth();   // רענון הטבלאות ברקע כדי שיצביעו לקישור החדש
+                    } catch (upErr) {
+                        console.warn('edit crop upload failed', upErr);
+                        alert('החיתוך הצליח אבל שמירת התמונה נכשלה - בדוק חיבור ונסה שוב.');
+                    } finally {
+                        if (okBtn) { okBtn.disabled = false; okBtn.innerText = '✓ חתוך'; }
+                    }
                 } else {
                     recognizedImageBase64 = dataUrl;
                     closeManualCrop();
@@ -2675,6 +2733,20 @@
                 alert('החיתוך נכשל - נסה שוב.');
             }
         };
+
+        // מצייר מחדש את תצוגת התמונה במסך העריכה של מסמך קיים, כולל כפתור החיתוך הידני.
+        // bustCache: אחרי החלפת תמונה ב-Storage באותה כתובת - מונע מהדפדפן להציג את הגרסה השמורה בזיכרון.
+        function renderEditImageWrap(inv, bustCache = false) {
+            const imgWrap = document.getElementById('invoicePreviewImgWrap');
+            if (!imgWrap || !inv) return;
+            const url = inv.imageUrl ? (bustCache ? inv.imageUrl + '&cb=' + Date.now() : inv.imageUrl) : '';
+            imgWrap.innerHTML = inv.imageUrl
+                ? (((inv.pageCount || 1) > 1
+                    ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openImageViewer('${esc(inv.imageUrl)}'); return false;"><img src="${esc(url)}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${esc(inv.pageCount)} עמודים - גלול לצפייה</div>`
+                    : `<a href="#" onclick="openImageViewer('${esc(inv.imageUrl)}'); return false;"><img src="${esc(url)}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd;"></a>`)
+                    + `<div style="margin-top:4px;"><button type="button" class="view-img-btn" onclick="openManualCrop()">✂️ חתוך ידנית (סימון פינות)</button></div>`)
+                : '';
+        }
 
         function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {
             pendingNewDocId = null;   // טופס חדש = מסמך חדש
@@ -2713,15 +2785,12 @@
 
             if (existingInvoice) {
                 editingInvoiceId = existingInvoice.id;
+                editCropInvoice = existingInvoice;
                 editingOriginalKind = isDeliveryMode ? 'delivery' : (scanMode === 'income' ? 'income' : 'invoice');
                 const editKindName = isDeliveryMode ? 'תעודת משלוח' : (scanMode === 'income' ? 'חשבונית הכנסה' : 'חשבונית');
                 if (formTitle) formTitle.innerText = "עריכת " + editKindName + " קיימת";
                 if (saveBtn) saveBtn.innerText = "עדכן " + editKindName;
-                imgWrap.innerHTML = existingInvoice.imageUrl
-                    ? ((existingInvoice.pageCount || 1) > 1
-                        ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openImageViewer('${esc(existingInvoice.imageUrl)}'); return false;"><img src="${esc(existingInvoice.imageUrl)}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${esc(existingInvoice.pageCount)} עמודים - גלול לצפייה</div>`
-                        : `<a href="#" onclick="openImageViewer('${esc(existingInvoice.imageUrl)}'); return false;"><img src="${esc(existingInvoice.imageUrl)}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd;"></a>`)
-                    : '';
+                renderEditImageWrap(existingInvoice);
 
                 const hintElEdit = document.getElementById('supplierMatchHint');
                 if (hintElEdit) hintElEdit.innerText = '';
@@ -2747,6 +2816,7 @@
                 handwrittenNotesList = normalizeHandwrittenNotes(existingInvoice.handwrittenNotes);
             } else {
                 editingInvoiceId = null;
+                editCropInvoice = null;
                 const newKindName = isDeliveryMode ? 'תעודת משלוח' : (scanMode === 'income' ? 'חשבונית הכנסה' : 'חשבונית');
                 if (formTitle) formTitle.innerText = "אישור ואימות " + newKindName;
                 if (saveBtn) saveBtn.innerText = "שמור " + newKindName;
@@ -2876,6 +2946,7 @@
 
         window.cancelInvoiceEntry = function() {
             document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
+            editCropInvoice = null;
             recognizedImageBase64 = null;
             recognizedItemsList = [];
             editingInvoiceId = null;
@@ -3006,6 +3077,7 @@
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
                 editingInvoiceId = null;
+                editCropInvoice = null;
                 pendingNewDocId = null;
                 if (!isIncome && !isUpdate) learnDateChoice(supplier, invoiceDate, scanMetaAtSave);
                 const savedKind = isIncome ? 'income' : 'invoice';

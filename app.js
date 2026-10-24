@@ -424,7 +424,8 @@
                 try { on = !on; await trk.applyConstraints({ advanced: [{ torch: on }] }); b.textContent = on ? '🔦 כבה' : '🔦 פנס'; }
                 catch (e) { on = false; }
             };
-            ctl.insertBefore(b, ctl.firstChild);
+            // סדר ב-RTL: צלם מימין, פנס במרכז, ביטול משמאל — מכניסים אחרי כפתור הצילום
+            ctl.insertBefore(b, ctl.children[1] || null);
         }
 
         window.closeCameraModal = function() {
@@ -442,11 +443,29 @@
 
         // ---- חיתוך אוטומטי של המסמך: זיהוי דף בהיר על רקע כהה + יישור פרספקטיבה ----
         // אם לא זוהה דף בביטחון — מחזיר את התמונה המקורית ללא שינוי.
-        function findDocumentQuad(rgba, w, h, thrFactor) {
+        // סגירה מורפולוגית (הרחבה ואז שחיקה) על מסכה בינארית - מחברת קטעים שניתקו בקפל/צל
+        function closeBinaryMask(mask, w, h, r) {
+            let tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+            for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let m = 0; for (let k = -r; k <= r; k++) { const xx = x + k; if (xx >= 0 && xx < w && mask[y * w + xx]) m = 1; } tmp[y * w + x] = m; }
+            for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let m = 0; for (let k = -r; k <= r; k++) { const yy = y + k; if (yy >= 0 && yy < h && tmp[yy * w + x]) m = 1; } out[y * w + x] = m; }
+            for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let m = 1; for (let k = -r; k <= r; k++) { const xx = x + k; if (xx >= 0 && xx < w && !out[y * w + xx]) m = 0; } tmp[y * w + x] = m; }
+            for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let m = 1; for (let k = -r; k <= r; k++) { const yy = y + k; if (yy >= 0 && yy < h && !tmp[yy * w + x]) m = 0; } out[y * w + x] = m; }
+            return out;
+        }
+
+        function findDocumentQuad(rgba, w, h, thrFactor, whiteMode) {
             const n = w * h, gray = new Uint8Array(n), hist = new Array(256).fill(0);
-            for (let i = 0, p = 0; i < n; i++, p += 4) {
-                const g = (rgba[p] * 299 + rgba[p + 1] * 587 + rgba[p + 2] * 114) / 1000 | 0;
-                gray[i] = g; hist[g]++;
+            if (whiteMode) {
+                // מפת "לבנות": הערוץ החלש ביותר. נייר לבן גבוה בכל הערוצים; רקע צבעוני (שיש בז', עץ) נמוך באחד הערוצים
+                for (let i = 0, p = 0; i < n; i++, p += 4) {
+                    const g = Math.min(rgba[p], rgba[p + 1], rgba[p + 2]);
+                    gray[i] = g; hist[g]++;
+                }
+            } else {
+                for (let i = 0, p = 0; i < n; i++, p += 4) {
+                    const g = (rgba[p] * 299 + rgba[p + 1] * 587 + rgba[p + 2] * 114) / 1000 | 0;
+                    gray[i] = g; hist[g]++;
+                }
             }
             // סף אוטומטי (Otsu)
             let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
@@ -460,7 +479,14 @@
                 if (between > best) { best = between; thr = t; }
             }
             if (thrFactor && thrFactor !== 1) thr = Math.max(20, Math.round(thr * thrFactor));
-            // הרכיב הבהיר הרציף הגדול ביותר
+            // הרכיב הבהיר הרציף הגדול ביותר (במצב לבנות: סגירה מחברת קטעי קבלה מקומטת שהתפצלו על קפלים)
+            let binMask = null;
+            if (whiteMode) {
+                binMask = new Uint8Array(n);
+                for (let i = 0; i < n; i++) binMask[i] = gray[i] > thr ? 1 : 0;
+                binMask = closeBinaryMask(binMask, w, h, 2);
+                for (let i = 0; i < n; i++) gray[i] = binMask[i] ? 255 : 0;
+            }
             const label = new Int32Array(n), stack = new Int32Array(n);
             let bestLabel = 0, bestSize = 0, cur = 0;
             for (let s = 0; s < n; s++) {
@@ -574,6 +600,8 @@
                 const quadL = findDocumentQuad(imgd, w, h, 0.72);
                 const touches = (q) => q.filter(p => p[0] <= 1 || p[1] <= 1 || p[0] >= w - 2 || p[1] >= h - 2).length;
                 if (quadL && touches(quadL) < 2 && pArea(quadL) < w * h * 0.9 && (!quad || (pArea(quadL) > pArea(quad) * 1.04 && pArea(quadL) < pArea(quad) * 1.8))) quad = quadL;
+                // רקע צבעוני בהיר (שיש/גרניט/עץ): בהירות רגילה לא מפרידה נייר מהרקע — מנסים מפת לבנות
+                if (!quad) quad = findDocumentQuad(imgd, w, h, 1, true);
                 if (!quad) return src;
                 // דף קטן מדי בפריים = כנראה זיהוי שגוי; עדיף הפריים המלא מאשר חיתוך שגוי
                 if (pArea(quad) < w * h * 0.35) return src;
@@ -715,7 +743,16 @@
                     if (sc2 < sc1) { canvas.width = keep.width; canvas.height = keep.height; canvas.getContext('2d').drawImage(keep, 0, 0); }
                 }
             } catch (e) { console.log('blur check failed', e); }
-            const base64Data = enhanceDocument(autoCropDocument(canvas)).toDataURL('image/jpeg', 0.9).split(',')[1];
+            // כיווץ ודחיסה לפני שמירה (אותו כלל כמו בהעלאת קובץ): חוסך נפח בלי לפגוע בקריאות
+            let scanWork = enhanceDocument(autoCropDocument(canvas));
+            const [capW, capH] = capDocumentSize(scanWork.width, scanWork.height);
+            if (capW !== scanWork.width || capH !== scanWork.height) {
+                const fin = document.createElement('canvas'); fin.width = capW; fin.height = capH;
+                const fctx = fin.getContext('2d'); fctx.imageSmoothingQuality = 'high';
+                fctx.drawImage(scanWork, 0, 0, capW, capH);
+                scanWork = fin;
+            }
+            const base64Data = scanWork.toDataURL('image/jpeg', UPLOAD_JPEG_QUALITY).split(',')[1];
             closeCameraModal();
             cameraPages.push(base64Data);
             const canAddPage = cameraPages.length < MAX_SCAN_PAGES - (appendingToScan ? currentScanPages.length : 0);

@@ -25,6 +25,15 @@
     <div class="iv-bar"><button class="iv-close" onclick="closeImageViewer()">✕ סגור</button></div>
     <div class="iv-body"><img id="imgViewerImg" alt=""></div>
 </div>
+<!-- מודאל חיתוך ידני: גרירת 4 פינות על התמונה וגזירה עם יישור -->
+<div id="cropModalOverlay" class="hidden">
+    <div class="iv-bar">
+        <button class="iv-close crop-ok" onclick="confirmManualCrop()">✓ חתוך</button>
+        <button class="iv-close" onclick="resetManualCrop()">↺ איפוס</button>
+        <button class="iv-close" onclick="closeManualCrop()">✕ ביטול</button>
+    </div>
+    <div id="cropModalBody"><canvas id="cropModalCanvas"></canvas></div>
+</div>
 <!-- מודאל מצלמה חיה לצילום תמונה בודדת -->
     <div id="cameraModalOverlay" class="hidden">
         <video id="cameraModalVideo" autoplay playsinline muted poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" style="opacity:0; transition:opacity 0.2s;"></video>

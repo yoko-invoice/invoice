@@ -601,8 +601,12 @@
                 const touches = (q) => q.filter(p => p[0] <= 1 || p[1] <= 1 || p[0] >= w - 2 || p[1] >= h - 2).length;
                 if (quadL && touches(quadL) < 2 && pArea(quadL) < w * h * 0.9 && (!quad || (pArea(quadL) > pArea(quad) * 1.04 && pArea(quadL) < pArea(quad) * 1.8))) quad = quadL;
                 // רקע צבעוני בהיר (שיש/גרניט/עץ): בהירות רגילה לא מפרידה נייר מהרקע — מנסים מפת לבנות
-                if (!quad) quad = findDocumentQuad(imgd, w, h, 1, true);
+                let whiteFallbackQuad = false;
+                if (!quad) { quad = findDocumentQuad(imgd, w, h, 1, true); whiteFallbackQuad = !!quad; }
                 if (!quad) return src;
+                // מפת הלבנות עלולה "לזהות" את הרקע עצמו כדף (בד/שיש בהיר שמכסה כמעט את כל הפריים) —
+                // מרובע כמעט-מלא מהמצב הזה שקול לאי-זיהוי: נשארים עם הפריים המלא בלי עיוות מיותר
+                if (whiteFallbackQuad && pArea(quad) >= w * h * 0.90) return src;
                 // דף קטן מדי בפריים = כנראה זיהוי שגוי; עדיף הפריים המלא מאשר חיתוך שגוי
                 if (pArea(quad) < w * h * 0.35) return src;
                 // הגדלה חזרה לגודל המקורי + מרווח קטן החוצה כדי לא לגזור את קצה הדף
@@ -1947,9 +1951,10 @@
                     : '';
                 return;
             }
-            wrap.innerHTML = recognizedPageCount > 1
+            wrap.innerHTML = (recognizedPageCount > 1
                 ? `<div style="max-height:280px; overflow-y:auto; border:1px solid #ddd; border-radius:8px;"><a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="width:100%; display:block;"></a></div><div style="font-size:0.75em; color:#555; margin-top:2px;">${recognizedPageCount} עמודים - לחץ להגדלה</div>`
-                : `<a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd; cursor:zoom-in;"></a><div style="font-size:0.75em; color:#555; margin-top:2px;">לחץ להגדלה</div>`;
+                : `<a href="#" onclick="openScannedPreview(); return false;"><img src="${recognizedImageBase64}" style="max-width:100%; max-height:220px; border-radius:8px; border:1px solid #ddd; cursor:zoom-in;"></a><div style="font-size:0.75em; color:#555; margin-top:2px;">לחץ להגדלה</div>`)
+                + `<div style="margin-top:4px;"><button type="button" class="view-img-btn" onclick="openManualCrop()">✂️ חתוך ידנית (סימון פינות)</button></div>`;
         }
 
         // בונה מחדש את התמונה שתישמר/תועלה מהעמודים המסומנים בלבד
@@ -2510,6 +2515,165 @@
         // פותח את החשבונית שנסרקה כרגע במסך מלא (נסגר בכפתור "סגור")
         window.openScannedPreview = function() {
             if (recognizedImageBase64 && window.openImageViewer) window.openImageViewer(recognizedImageBase64);
+        };
+
+        // ---- חיתוך ידני: סימון 4 פינות על התמונה הסרוקה, גזירה ויישור פרספקטיבה ----
+        // fallback לכשהחיתוך האוטומטי לא מצליח (רקע בהיר הדומה לנייר). הגזירה תמיד לפי סימון
+        // המשתמש בלבד - אין כאן זיהוי אוטומטי שעלול לגזור תוכן בטעות.
+        let cropState = null;   // { img, mode:'page'|'preview', pageIdx, scale, quad:[[x,y]x4] בקואורדינטות הקנבס, dragIdx }
+
+        function defaultCropQuad(w, h) {
+            const mx = w * 0.08, my = h * 0.06;
+            return [[mx, my], [w - mx, my], [w - mx, h - my], [mx, h - my]];
+        }
+
+        function layoutCropCanvas() {
+            const st = cropState; if (!st) return;
+            const canvas = document.getElementById('cropModalCanvas');
+            const availW = Math.min(window.innerWidth - 16, 600);
+            const availH = window.innerHeight - 150;
+            st.scale = Math.min(availW / st.img.width, availH / st.img.height, 1);
+            canvas.width = Math.max(1, Math.round(st.img.width * st.scale));
+            canvas.height = Math.max(1, Math.round(st.img.height * st.scale));
+            if (!st.quad) st.quad = defaultCropQuad(canvas.width, canvas.height);
+            drawCropCanvas();
+        }
+
+        function drawCropCanvas() {
+            const st = cropState; if (!st) return;
+            const canvas = document.getElementById('cropModalCanvas');
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(st.img, 0, 0, canvas.width, canvas.height);
+            const q = st.quad;
+            // עמעום האזור שמחוץ למרובע
+            ctx.save();
+            ctx.fillStyle = 'rgba(0,0,0,0.45)';
+            ctx.beginPath();
+            ctx.rect(0, 0, canvas.width, canvas.height);
+            ctx.moveTo(q[0][0], q[0][1]);
+            for (let i = 1; i < 4; i++) ctx.lineTo(q[i][0], q[i][1]);
+            ctx.closePath();
+            ctx.fill('evenodd');
+            ctx.restore();
+            // מסגרת המרובע
+            ctx.strokeStyle = '#2ecc71'; ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.moveTo(q[0][0], q[0][1]);
+            for (let i = 1; i < 4; i++) ctx.lineTo(q[i][0], q[i][1]);
+            ctx.closePath();
+            ctx.stroke();
+            // ידיות הפינות
+            for (const p of q) {
+                ctx.beginPath(); ctx.arc(p[0], p[1], 13, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff'; ctx.fill();
+                ctx.lineWidth = 3; ctx.strokeStyle = '#2ecc71'; ctx.stroke();
+            }
+        }
+
+        function cropCanvasPos(ev) {
+            const canvas = document.getElementById('cropModalCanvas');
+            const r = canvas.getBoundingClientRect();
+            return [ev.clientX - r.left, ev.clientY - r.top];
+        }
+
+        function bindCropCanvasEvents() {
+            const canvas = document.getElementById('cropModalCanvas');
+            if (canvas.dataset.bound) return;
+            canvas.dataset.bound = '1';
+            canvas.addEventListener('pointerdown', (ev) => {
+                const st = cropState; if (!st) return;
+                const [x, y] = cropCanvasPos(ev);
+                let best = -1, bestD = 44;   // רדיוס תפיסה נדיב לאצבע
+                st.quad.forEach((p, i) => { const d = Math.hypot(p[0] - x, p[1] - y); if (d < bestD) { bestD = d; best = i; } });
+                if (best >= 0) { st.dragIdx = best; try { canvas.setPointerCapture(ev.pointerId); } catch (e) {} ev.preventDefault(); }
+            });
+            canvas.addEventListener('pointermove', (ev) => {
+                const st = cropState; if (!st || st.dragIdx == null) return;
+                const canvas2 = document.getElementById('cropModalCanvas');
+                const [x, y] = cropCanvasPos(ev);
+                st.quad[st.dragIdx] = [Math.max(0, Math.min(canvas2.width, x)), Math.max(0, Math.min(canvas2.height, y))];
+                drawCropCanvas();
+                ev.preventDefault();
+            });
+            const drop = () => { const st = cropState; if (st) st.dragIdx = null; };
+            canvas.addEventListener('pointerup', drop);
+            canvas.addEventListener('pointercancel', drop);
+        }
+
+        window.openManualCrop = function() {
+            if (!recognizedImageBase64) return;
+            // עמוד בודד נבחר: החיתוך חל על העמוד עצמו (שריד גם אם משנים סימון עמודים אחר כך).
+            // כמה עמודים: החיתוך חל על תמונת התצוגה המאוחדת (זו התמונה שנשמרת).
+            const selIdx = currentScanPages.map((_, i) => i).filter(i => selectedScanPages[i] !== false);
+            const single = selIdx.length === 1;
+            const srcUrl = single ? `data:image/jpeg;base64,${currentScanPages[selIdx[0]]}` : recognizedImageBase64;
+            const img = new Image();
+            img.onload = () => {
+                cropState = { img, mode: single ? 'page' : 'preview', pageIdx: single ? selIdx[0] : -1, quad: null, dragIdx: null, scale: 1 };
+                document.getElementById('cropModalOverlay').classList.remove('hidden');
+                bindCropCanvasEvents();
+                layoutCropCanvas();
+            };
+            img.onerror = () => alert('לא הצלחתי לטעון את התמונה לחיתוך.');
+            img.src = srcUrl;
+        };
+
+        window.closeManualCrop = function() {
+            document.getElementById('cropModalOverlay').classList.add('hidden');
+            cropState = null;
+        };
+
+        window.resetManualCrop = function() {
+            const st = cropState; if (!st) return;
+            const canvas = document.getElementById('cropModalCanvas');
+            st.quad = defaultCropQuad(canvas.width, canvas.height);
+            drawCropCanvas();
+        };
+
+        window.confirmManualCrop = async function() {
+            const st = cropState; if (!st) return;
+            try {
+                // חזרה לקואורדינטות המקור + מרווח קטן החוצה (3%) כדי לא לגזור קצה של המסמך
+                const inv = 1 / st.scale;
+                let P = st.quad.map(p => [p[0] * inv, p[1] * inv]);
+                const cx = P.reduce((a, p) => a + p[0], 0) / 4, cy = P.reduce((a, p) => a + p[1], 0) / 4;
+                P = P.map(p => [cx + (p[0] - cx) * 1.03, cy + (p[1] - cy) * 1.03]);
+                const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+                let outW = Math.round(Math.max(dist(P[0], P[1]), dist(P[3], P[2])));
+                let outH = Math.round(Math.max(dist(P[0], P[3]), dist(P[1], P[2])));
+                if (outW < 60 || outH < 60) { alert('הסימון קטן מדי - סמן את פינות המסמך.'); return; }
+                const srcC = document.createElement('canvas');
+                srcC.width = st.img.width; srcC.height = st.img.height;
+                const sctx = srcC.getContext('2d', { willReadFrequently: true });
+                sctx.drawImage(st.img, 0, 0);
+                const capR = Math.min(1, 2000 / Math.max(outW, outH));
+                outW = Math.round(outW * capR); outH = Math.round(outH * capR);
+                let out = warpQuad(sctx.getImageData(0, 0, srcC.width, srcC.height), P, outW, outH);
+                if (!out) { alert('החיתוך נכשל - נסה לסמן שוב.'); return; }
+                out = enhanceDocument(out);
+                const [fw, fh] = capDocumentSize(out.width, out.height);
+                if (fw !== out.width || fh !== out.height) {
+                    const fin = document.createElement('canvas'); fin.width = fw; fin.height = fh;
+                    const fctx = fin.getContext('2d'); fctx.imageSmoothingQuality = 'high';
+                    fctx.drawImage(out, 0, 0, fw, fh);
+                    out = fin;
+                }
+                const dataUrl = out.toDataURL('image/jpeg', UPLOAD_JPEG_QUALITY);
+                if (st.mode === 'page') {
+                    currentScanPages[st.pageIdx] = dataUrl.split(',')[1];
+                    currentScanThumbs[st.pageIdx] = await makeThumb(currentScanPages[st.pageIdx]);
+                    closeManualCrop();
+                    scanPreviewPromise = rebuildScanPreview();
+                    renderPageSelector();
+                } else {
+                    recognizedImageBase64 = dataUrl;
+                    closeManualCrop();
+                    renderScanPreviewWrap();
+                }
+            } catch (e) {
+                console.warn('manual crop failed', e);
+                alert('החיתוך נכשל - נסה שוב.');
+            }
         };
 
         function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {

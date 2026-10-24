@@ -2635,6 +2635,7 @@
         // טעינת <img crossOrigin> רגילה על אותה כתובת עם ה-cache-bust.
         async function loadSavedImageForCrop(url) {
             const bust = url + (url.includes('?') ? '&' : '?') + 'cropcb=' + Date.now();
+            const diag = [];   // אבחון קצר שמוצג למשתמש בהודעת השגיאה - מגלה את הגורם האמיתי בצילום מסך
             try {
                 const r = await fetch(bust, { mode: 'cors', credentials: 'omit', cache: 'no-store' });
                 if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -2642,9 +2643,17 @@
                 if (!blob.size) throw new Error('empty response');
                 return await loadCropImgEl(URL.createObjectURL(blob));
             } catch (e) {
+                diag.push('fetch: ' + ((e && e.message) || e));
                 console.warn('crop image fetch failed, falling back to <img crossOrigin>', e);
             }
-            return loadCropImgEl(bust, 'anonymous');
+            try {
+                return await loadCropImgEl(bust, 'anonymous');
+            } catch (e2) {
+                diag.push('img: ' + ((e2 && e2.message) || e2));
+                const err = new Error(diag.join(' | '));
+                err.userNote = diag.join(' | ');
+                throw err;
+            }
         }
 
         function loadCropImgEl(src, cors) {
@@ -2670,7 +2679,7 @@
                     })
                     .catch((err) => {
                         console.warn('saved crop image load failed', err);
-                        alert('לא הצלחתי לטעון את התמונה השמורה לחיתוך. בדוק חיבור ונסה שוב.');
+                        alert('לא הצלחתי לטעון את התמונה השמורה לחיתוך. בדוק חיבור ונסה שוב.' + ((err && err.userNote) ? '\n(' + err.userNote + ')' : ''));
                     });
                 return;
             }

@@ -2650,10 +2650,34 @@
                 return await loadCropImgEl(bust, 'anonymous');
             } catch (e2) {
                 diag.push('img: ' + ((e2 && e2.message) || e2));
-                const err = new Error(diag.join(' | '));
-                err.userNote = diag.join(' | ');
-                throw err;
             }
+            // שתי הדרכים נכשלו - מריצים סוללת אבחון קצרה שמגלה איפה בדיוק נשברת הטעינה
+            diag.push(await diagnoseImageAccess(bust));
+            const err = new Error(diag.join(' | '));
+            err.userNote = diag.join('\n');
+            throw err;
+        }
+
+        // סוללת אבחון לכישלון טעינת תמונה: (1) האם ה-host של התמונה נגיש בכלל (fetch חופשי
+        // בלי CORS - אם זה מצליח, השרת נגיש והבעיה היא רק בבדיקת ה-CORS; אם נכשל, יש חסימה
+        // ברמת המכשיר/רשת), (2) בקרה: host חיצוני אחר של גוגל, (3) בקרה: fetch פנימי לאתר
+        // עצמו. התוצאות מוצגות בהודעת השגיאה כדי שצילום מסך יגלה את הגורם בסבב אחד.
+        async function diagnoseImageAccess(bustedUrl) {
+            const probe = async (u, opts) => {
+                try {
+                    const ctl = new AbortController();
+                    const t = setTimeout(() => ctl.abort(), 8000);
+                    const r = await fetch(u, Object.assign({ signal: ctl.signal }, opts));
+                    clearTimeout(t);
+                    return 'ok:' + r.type + ':' + r.status;
+                } catch (e) { return 'FAIL:' + ((e && (e.name + ' ' + e.message)) || e); }
+            };
+            let host = '?';
+            try { host = new URL(bustedUrl).host; } catch (e) {}
+            const a = await probe(bustedUrl, { mode: 'no-cors', cache: 'no-store' });
+            const b = await probe('https://www.gstatic.com/generate_204?cb=' + Date.now(), { mode: 'no-cors', cache: 'no-store' });
+            const c = await probe('./icon-192.png', { cache: 'no-store' });
+            return 'host=' + host + '\nfree=' + a + '\ngstatic=' + b + '\nlocal=' + c;
         }
 
         function loadCropImgEl(src, cors) {

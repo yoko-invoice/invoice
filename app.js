@@ -2119,6 +2119,7 @@
         // כתובת ה-Cloud Function שמבצעת את הזיהוי בפועל (שומרת את מפתח ה-AI בצד שרת, לא בדפדפן).
         // יש להחליף בכתובת האמיתית לאחר פריסת הפונקציה recognizeInvoice (ראו קובץ הפונקציה הנפרד).
         const RECOGNIZE_FUNCTION_URL = "https://recognizeinvoice-vngzfxix3a-uc.a.run.app";
+        const INVOICE_IMAGE_PROXY_URL = "https://invoiceimageproxy-vngzfxix3a-uc.a.run.app";
 
         function setRecognitionControlsDisabled(disabled) {
             document.querySelectorAll('[data-recognition-trigger]').forEach(btn => btn.disabled = disabled);
@@ -2633,6 +2634,23 @@
         // אותה רשומת מטמון מפילה את טעינת ה-CORS של החיתוך). את ה-blob הורד הופכים ל-objectURL
         // מקומי - same-origin, כך שהקנבס אף פעם לא "נכתם". אם ה-fetch נכשל, ניסיון גיבוי:
         // טעינת <img crossOrigin> רגילה על אותה כתובת עם ה-cache-bust.
+        // טוען את תמונת החשבונית דרך פונקציית הפרוקסי בצד שרת (מאומת ב-ID token כמו שאר
+        // הפונקציות). מחלץ את נתיב האובייקט מתוך כתובת ההורדה הרגילה של Firebase Storage.
+        async function loadViaImageProxy(url) {
+            const m = /\/o\/([^?]+)/.exec(url);
+            if (!m) throw new Error('no storage path in URL');
+            const path = decodeURIComponent(m[1]);
+            let tok = '';
+            try { await fbAuth.authStateReady(); tok = fbAuth.currentUser ? await fbAuth.currentUser.getIdToken() : ''; } catch (e) {}
+            const r = await fetch(INVOICE_IMAGE_PROXY_URL + '?path=' + encodeURIComponent(path), {
+                headers: { Authorization: 'Bearer ' + tok }, cache: 'no-store'
+            });
+            if (!r.ok) throw new Error('proxy HTTP ' + r.status);
+            const blob = await r.blob();
+            if (!blob.size) throw new Error('proxy empty');
+            return loadCropImgEl(URL.createObjectURL(blob));
+        }
+
         async function loadSavedImageForCrop(url) {
             const bust = url + (url.includes('?') ? '&' : '?') + 'cropcb=' + Date.now();
             const diag = [];   // אבחון קצר שמוצג למשתמש בהודעת השגיאה - מגלה את הגורם האמיתי בצילום מסך
@@ -2644,7 +2662,15 @@
                 return await loadCropImgEl(URL.createObjectURL(blob));
             } catch (e) {
                 diag.push('fetch: ' + ((e && e.message) || e));
-                console.warn('crop image fetch failed, falling back to <img crossOrigin>', e);
+                console.warn('crop image fetch failed, trying image proxy', e);
+            }
+            // נתיב גיבוי דרך פונקציית הפרוקסי (אותו שרת ענן של זיהוי ה-AI). מועיל כשהמכשיר
+            // חוסם בקשות CORS ישירות ל-Firebase Storage - הפרוקסי מושך את התמונה בצד שרת.
+            try {
+                return await loadViaImageProxy(url);
+            } catch (ep) {
+                diag.push('proxy: ' + ((ep && ep.message) || ep));
+                console.warn('image proxy failed, falling back to <img crossOrigin>', ep);
             }
             try {
                 return await loadCropImgEl(bust, 'anonymous');

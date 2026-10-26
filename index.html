@@ -352,6 +352,32 @@
                 </table>
             </div>
             
+            <div id="reportIncomeBlock" style="margin-top:14px; border:1.5px solid #8e44ad; border-radius:10px; padding:10px;">
+                <div style="font-weight:bold; color:#8e44ad; margin-bottom:6px;">💰 חשבוניות הכנסה החודש <span style="font-weight:normal; font-size:0.8em; color:#555;">(סיכום נפרד - לא נכללות בסכומי הספקים)</span></div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>לקוח</th>
+                                <th>מס' חשבונית</th>
+                                <th>תאריך</th>
+                                <th>סכום</th>
+                            </tr>
+                        </thead>
+                        <tbody id="reportIncomeTableBody">
+                            <tr><td colspan="4" style="color:#888;">אין חשבוניות הכנסה החודש.</td></tr>
+                        </tbody>
+                        <tfoot>
+                            <tr style="background:#f8f9fa; font-weight:bold;">
+                                <td>סה"כ הכנסות החודש</td>
+                                <td id="reportIncomeTotalCell" style="color:#8e44ad;">0.00 ₪</td>
+                                <td colspan="2"></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            </div>
+
             <div class="action-btns-group" style="margin-top:14px;">
                 <button class="pdf-btn" onclick="exportInvoicesToPDF()">📄 הורד דוח A4 לחודש (PDF)</button>
                 <button class="excel-btn" onclick="exportInvoicesToExcel()">📊 ייצוא לאקסל (XLSX)</button>
@@ -403,6 +429,29 @@
                 </tr>
             </tfoot>
         </table>
+        <div id="invoicesPdfIncomeSection" style="margin-top:26px; display:none;">
+            <h3 style="font-size:19px; margin:0 0 2px 0;">חשבוניות הכנסה</h3>
+            <div style="font-size:12px; color:#555; margin-bottom:8px;">סיכום נפרד - לא נכלל בסכום הספקים</div>
+            <table style="width:100%; border-collapse:collapse;">
+                <thead>
+                    <tr style="background:#f5f6f7;">
+                        <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">לקוח</th>
+                        <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">מס' חשבונית</th>
+                        <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">תאריך</th>
+                        <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">סכום</th>
+                    </tr>
+                </thead>
+                <tbody id="invoicesPdfIncomeTableBody"></tbody>
+                <tfoot>
+                    <tr>
+                        <td style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;">סה"כ הכנסות החודש</td>
+                        <td style="border:1px solid #999;"></td>
+                        <td style="border:1px solid #999;"></td>
+                        <td id="invoicesPdfIncomeTotalCell" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;"></td>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
     </div>
 
     <script src="ui.js"></script>

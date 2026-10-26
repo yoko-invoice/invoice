@@ -865,8 +865,9 @@
             if (!inboxItems.length) html += '<div style="color:#777; padding:12px;">אין חשבוניות ממתינות.</div>';
             for (const it of inboxItems) {
                 const f = it.fields || {};
-                const title = it.aiFailed ? '(לא זוהה - לבדיקה ידנית)' : esc(f.supplier || 'ספק לא מזוהה');
-                const kind = f.docType === 'delivery_note' ? 'תעודת משלוח' : 'חשבונית';
+                const title = it.aiFailed ? '(לא זוהה - לבדיקה ידנית)'
+                    : esc(f.docType === 'income' ? incomeCustomerName(f) : (f.supplier || 'ספק לא מזוהה'));
+                const kind = f.docType === 'delivery_note' ? 'תעודת משלוח' : (f.docType === 'income' ? 'חשבונית הכנסה' : 'חשבונית');
                 html += `<div style="border:1px solid #ddd; border-radius:10px; padding:8px; margin-bottom:8px;">
                     <div style="display:flex; justify-content:space-between; gap:8px;"><b>${title}</b><span>${f.amount ? fmt(f.amount) + ' ₪' : ''}</span></div>
                     <div style="font-size:0.85em; color:#555;">${kind} ${esc(f.invoiceNumber || '')} ${esc(f.invoiceDate || '')}</div>
@@ -907,7 +908,8 @@
                 returnToInboxAfterForm = true;
                 closeInboxModal();
                 window.scrollTo(0, 0);
-                await handleScanFiles({ target: { files: [file] } }, (it.fields && it.fields.docType === 'delivery_note') ? 'delivery' : 'invoice');
+                const _dt = it.fields && it.fields.docType;
+                await handleScanFiles({ target: { files: [file] } }, _dt === 'delivery_note' ? 'delivery' : (_dt === 'income' ? 'income' : 'invoice'));
             } catch (e) {
                 console.warn('open inbox item failed', e);
                 returnToInboxAfterForm = false;
@@ -2955,7 +2957,7 @@
 
                 if (recognized) {
                     const dupList = isDeliveryMode ? monthlyNotes : (scanMode === 'income' ? monthlyIncome : monthlyInvoices);
-                    const isDuplicate = dupList.some(inv => isSameDocument(inv, recognized, isDeliveryMode));
+                    const isDuplicate = dupList.some(inv => isSameDocument(inv, recognized, isDeliveryMode, (!isDeliveryMode && scanMode === 'income')));
 
                     if (isDuplicate) {
                         duplicateBox.classList.remove('hidden');
@@ -3114,7 +3116,7 @@
                         compareList = snapCmp.docs.map(d => d.data()).filter(x => isIncome ? x.docType === 'income' : (x.docType !== 'delivery_note' && x.docType !== 'income'));
                     } catch (e) { compareList = []; }
                 }
-                const isDuplicate = compareList.some(inv => isSameDocument(inv, { supplier, invoiceNumber, invoiceDate, amount }, false));
+                const isDuplicate = compareList.some(inv => isSameDocument(inv, { supplier, invoiceNumber, invoiceDate, amount }, false, isIncome));
                 if (isDuplicate && !await appConfirm(`⚠️ חשבונית דומה (${isIncome ? 'לקוח' : 'ספק'}: ${supplier}, סכום: ${amount} ₪) כבר קיימת במערכת.\nלשמור בכל זאת?`)) {
                     return;
                 }
@@ -3258,6 +3260,40 @@
         }
 
         // טבלת חשבוניות ההכנסה של החודש - נפרדת מחשבוניות הספקים, כולל סכום חודשי
+        // שם הלקוח בחשבונית הכנסה: שדה customer אם קיים; אחרת שדה supplier (בחשבוניות שהוזנו ידנית כותבים שם את הלקוח).
+        // אם המסמך הונפק בשם העסק עצמו והלקוח לא נשמר - מציגים "-" ולא ממציאים לקוח.
+        const OWN_BUSINESS_TAX_ID = '516068236';
+        const OWN_BUSINESS_NAME_RE = /יוקו|י\.\s*ו\.\s*ק\.\s*ו|יזמות/;
+        function incomeCustomerName(inv) {
+            const c = String(inv.customer || '').trim();
+            if (c) return c;
+            const tax = String(inv.taxId || '').replace(/\D/g, '');
+            if (tax === OWN_BUSINESS_TAX_ID) return '-';
+            const s = String(inv.supplier || '').trim();
+            if (!s || OWN_BUSINESS_NAME_RE.test(s)) return '-';
+            return s;
+        }
+
+        // אזור חשבוניות ההכנסה בתוך כרטיס דוח הספקים החודשי (מעקב על המסך) - סיכום נפרד, לא נספר בספקים
+        function renderReportIncomeBlock() {
+            const tbody = document.getElementById('reportIncomeTableBody');
+            const totalCell = document.getElementById('reportIncomeTotalCell');
+            if (!tbody || !totalCell) return;
+            if (!monthlyIncome.length) {
+                tbody.innerHTML = '<tr><td colspan="4" style="color:#888;">אין חשבוניות הכנסה החודש.</td></tr>';
+                totalCell.innerText = '0.00 ₪';
+                return;
+            }
+            tbody.innerHTML = monthlyIncome.map(inv => `
+                <tr>
+                    <td>${esc(incomeCustomerName(inv))}</td>
+                    <td>${esc(inv.invoiceNumber || '-')}</td>
+                    <td>${inv.invoiceDate ? esc(inv.invoiceDate.split('-').reverse().join('/')) : '-'}</td>
+                    <td>${(Number(inv.amount) || 0).toFixed(2)} ₪</td>
+                </tr>`).join('');
+            totalCell.innerText = monthlyIncome.reduce((s, i) => s + (Number(i.amount) || 0), 0).toFixed(2) + ' ₪';
+        }
+
         function renderIncomeRows() {
             const tbody = document.getElementById('incomeTableBody');
             if (!tbody) return;
@@ -3268,7 +3304,7 @@
                     const amt = Number(inv.amount) || 0;
                     return `
                         <tr>
-                            <td>${esc(inv.supplier)}</td>
+                            <td>${esc(incomeCustomerName(inv))}</td>
                             <td>${esc(inv.invoiceNumber || '-')}${inv.invoiceDate ? `<br><span style="font-size:0.8em; color:#777;">${esc(inv.invoiceDate.split('-').reverse().join('/'))}</span>` : ''}</td>
                             <td>${amt.toFixed(2)} ₪</td>
                             <td>${esc(inv.paymentMethod || '-')}</td>
@@ -3283,6 +3319,7 @@
             }
             const totalEl = document.getElementById('incomeTotalCell');
             if (totalEl) totalEl.innerText = monthlyIncome.reduce((s, i) => s + (Number(i.amount) || 0), 0).toFixed(2) + ' ₪';
+            renderReportIncomeBlock();
         }
 
         window.loadInvoicesForMonth = async function() {
@@ -3331,9 +3368,19 @@
         };
 
         // האם מסמך קיים (ex) הוא כפילות של מסמך חדש (c = {supplier, invoiceNumber, invoiceDate, amount})?
-        function isSameDocument(ex, c, isDelivery) {
-            if (ex.supplier !== c.supplier) return false;
+        function isSameDocument(ex, c, isDelivery, isIncome) {
             const exNum = String(ex.invoiceNumber || '').trim(), cNum = String(c.invoiceNumber || '').trim();
+            // חשבוניות הכנסה: שדה supplier מכיל את הלקוח (נכתב ידני, יכול להשתנות) או את המנפיק (מילוי AI),
+            // ואסור שהבדל בשם יאפשר שמירה כפולה של אותה חשבונית. מצד שני, מספר בלבד אינו הוכחה:
+            // פלטפורמות שונות המנפיקות בשם העסק עשויות להחזיק סדרות מספור נפרדות. לכן מספר זהה
+            // נחשב כפילות רק כשהסכום או התאריך תואמים (אותה חשבונית בשני מקורות), לא כששניהם שונים.
+            if (isIncome && exNum && cNum && exNum === cNum) {
+                const exAmt = Number(ex.amount) || 0, cAmt = Number(c.amount) || 0;
+                const sameAmt = Math.abs(exAmt - cAmt) < 0.01 && Math.abs(cAmt) >= 0.01;
+                const sameDate = Boolean(ex.invoiceDate) && ex.invoiceDate === (c.invoiceDate || '');
+                if (sameAmt || sameDate) return true;
+            }
+            if (ex.supplier !== c.supplier) return false;
             // יש מספר לשני המסמכים: המספר מחליט. מספרים שונים = מסמכים שונים, גם באותו תאריך ובאותו סכום
             if (exNum && cNum) return exNum === cNum;
             const amt = Number(c.amount) || 0;
@@ -3398,6 +3445,7 @@
                 if (hasCommission) totalCell.innerText = `${totalWithoutCommission.toFixed(2)} ₪`;
                 commCell.innerText = `${totalWithCommission.toFixed(2)} ₪`;
             }
+            renderReportIncomeBlock();
         }
 
         // הזזת ספק למעלה/למטה בדוח החודשי. סדר הדוח נקבע לפי רשימת הספקים, ולכן מעדכנים אותה
@@ -3873,6 +3921,23 @@
             if (hasCommission) document.getElementById('invoicesPdfTotalCell').innerText = `${totalWithoutCommission.toFixed(2)} ₪`;
             document.getElementById('invoicesPdfCommRow').style.display = hasCommission ? '' : 'none';
             document.getElementById('invoicesPdfTotalCommCell').innerText = `${totalWithCommission.toFixed(2)} ₪`;
+
+            // אזור חשבוניות הכנסה בדוח ה-A4: סיכום נפרד, מוצג רק כשיש חשבוניות הכנסה בחודש
+            const incSection = document.getElementById('invoicesPdfIncomeSection');
+            if (monthlyIncome.length) {
+                document.getElementById('invoicesPdfIncomeTableBody').innerHTML = monthlyIncome.map(inv => `
+                    <tr>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${esc(incomeCustomerName(inv))}</td>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${esc(inv.invoiceNumber || '-')}</td>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${inv.invoiceDate ? esc(inv.invoiceDate.split('-').reverse().join('/')) : ''}</td>
+                        <td style="border:1px solid #999; padding:7px; font-size:14px;">${(Number(inv.amount) || 0).toFixed(2)} ₪</td>
+                    </tr>`).join('');
+                document.getElementById('invoicesPdfIncomeTotalCell').innerText =
+                    monthlyIncome.reduce((s, i) => s + (Number(i.amount) || 0), 0).toFixed(2) + ' ₪';
+                incSection.style.display = '';
+            } else {
+                incSection.style.display = 'none';
+            }
 
             const exportContainer = document.getElementById('invoicesPdfContainer');
             await new Promise(resolve => setTimeout(resolve, 300));

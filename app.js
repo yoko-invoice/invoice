@@ -3334,12 +3334,12 @@
                             <td>${esc(inv.paymentMethod || '-')}</td>
                             <td>${esc(itemsTooltip)}${handwrittenBadgeHtml(inv)}</td>
                             <td>${esc(inv.notes || '-')}</td>
-                            <td style="white-space:nowrap;">
-                                ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : ''}
+                            <td class="act-cell"><div class="act-grid">
+                                ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : '<span></span>'}
                                 ${invoicePrintButton(inv)}
                                 <button class="edit-btn" data-id="${esc(inv.id)}" onclick="editInvoiceEntry(this.dataset.id)">ערוך</button>
                                 <button class="delete-btn" data-id="${esc(inv.id)}" onclick="deleteInvoiceEntry(this.dataset.id)">מחק</button>
-                            </td>
+                            </div></td>
                         </tr>`;
                 }).join('');
                 const rest = monthlyInvoices.length - list.length;
@@ -3398,12 +3398,12 @@
                             <td>${amt.toFixed(2)} ₪</td>
                             <td>${esc(inv.paymentMethod || '-')}</td>
                             <td>${esc(inv.notes || '-')}</td>
-                            <td style="white-space:nowrap;">
-                                ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : ''}
+                            <td class="act-cell"><div class="act-grid">
+                                ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : '<span></span>'}
                                 ${invoicePrintButton(inv)}
                                 <button class="edit-btn" data-id="${esc(inv.id)}" onclick="editInvoiceEntry(this.dataset.id)">ערוך</button>
                                 <button class="delete-btn" data-id="${esc(inv.id)}" onclick="deleteInvoiceEntry(this.dataset.id)">מחק</button>
-                            </td>
+                            </div></td>
                         </tr>`;
                 }).join('');
             }

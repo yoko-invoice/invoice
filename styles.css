@@ -143,3 +143,13 @@
 
 .mv-btn { width: auto; margin: 0; padding: 4px 10px; font-size: 0.9em; line-height: 1; background-color: #34495e; }
 .mv-btn:disabled { opacity: 0.3; cursor: default; }
+
+        /* עמודת פעולות בטבלאות: עמודות קבועות, כל כפתור תמיד באותו מקום */
+        .act-cell { white-space: nowrap; }
+        .act-grid { display: grid; width: 100%; justify-content: end; grid-template-columns: 78px 124px 50px 50px; gap: 4px; direction: rtl; align-items: center; }
+        .act-grid > span { display: block; }
+        .act-grid button { width: 100%; margin: 0; padding: 0 2px; height: 32px; line-height: 1; font-size: 0.85em; white-space: nowrap; overflow: hidden; text-overflow: clip; }
+        /* שורות לסירוגין (לבן / אפור בהיר) בחשבוניות החודש, כדי שגבולות השורות לא יאבדו בגלילה לצדדים */
+        #invoicesTableBody tr:nth-child(odd) > td, #incomeTableBody tr:nth-child(odd) > td { background-color: #ffffff; }
+        #invoicesTableBody tr:nth-child(even) > td, #incomeTableBody tr:nth-child(even) > td { background-color: #eceff3; }
+        #invoicesTableBody tr.credit-row > td { background-color: #fff5f5; }

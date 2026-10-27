@@ -1,4 +1,4 @@
-const CACHE = 'invoices-v27';
+const CACHE = 'invoices-v29';
 
 // קבצי האפליקציה (חובה לעבודה אופליין)
 const CORE = [
@@ -56,10 +56,11 @@ self.addEventListener('fetch', (e) => {
         const form = await req.formData();
         const files = form.getAll('files').filter((f) => f && f.size);
         const c = await caches.open('shared-files');
-        for (const k of await c.keys()) await c.delete(k);
+        // Preserve earlier shares that have not yet reached the waiting queue.
+        const batch = Date.now() + '-' + Math.random().toString(36).slice(2);
         let i = 0;
         for (const f of files) {
-          await c.put(self.registration.scope + 'shared/' + (i++), new Response(f, {
+          await c.put(self.registration.scope + 'shared/' + batch + '/' + (i++), new Response(f, {
             headers: { 'Content-Type': f.type || 'application/octet-stream', 'X-Name': encodeURIComponent(f.name || 'shared') }
           }));
         }

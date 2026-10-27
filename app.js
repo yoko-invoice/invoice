@@ -208,11 +208,12 @@
                     const name = decodeURIComponent(res.headers.get('X-Name') || 'shared');
                     files.push(new File([blob], name, { type: res.headers.get('Content-Type') || blob.type }));
                 }
-                await caches.delete('shared-files');
+                // Remove cached originals only after the queue has persisted them.
                 try { history.replaceState(null, '', location.pathname); } catch (e) { console.warn(e); }
                 if (!files.length) return;
-                await handleScanFiles({ target: { files: files, value: '' } }, 'invoice');
-            } catch (e) { console.warn('shared files failed', e); }
+                await queueImportedFiles(files, 'shared');
+                for (const req of reqs) await c.delete(req);
+            } catch (e) { console.warn('shared files failed', e); alert('לא כל הקבצים המשותפים נוספו להמתנה. המקור נשמר לניסיון חוזר בפתיחה הבאה.\n' + e.message); }
         }
 
         async function refreshBiometricUI() {
@@ -795,6 +796,50 @@
         };
 
         // ---- חשבוניות שהגיעו מהמייל (טיוטות לאישור) ----
+        function importedSourceLabel(source) {
+            return source === 'device' ? 'מהמכשיר' : source === 'shared' ? 'שיתוף מאפליקציה (למשל WhatsApp)' : 'מהמייל';
+        }
+        function needsInvoicePrint(inv) {
+            if (inv.printStatus) return inv.printStatus === 'needed';
+            return ['email', 'device', 'shared'].includes(inv.source);
+        }
+        async function queueImportedFiles(files, source) {
+            if (navigator.onLine === false) throw new Error('נדרש חיבור לאינטרנט לשמירת קובץ בהמתנה.');
+            let added = 0;
+            for (const file of files) {
+                if (!(file.type.startsWith('image/') || file.type === 'application/pdf' || /\.pdf$/i.test(file.name))) {
+                    throw new Error('אפשר להוסיף תמונות או PDF בלבד. הקובץ לא נשמר: ' + file.name);
+                }
+                if (file.size > 20 * 1024 * 1024) throw new Error('הקובץ גדול מ-20 MB: ' + file.name);
+                const bytes = await file.arrayBuffer();
+                const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(x => x.toString(16).padStart(2, '0')).join('');
+                const id = 'manual_' + hash;
+                const existing = await withTimeout(getDoc(doc(inboxCol(), id)), 20000, 'בדיקת הקובץ בהמתנה');
+                if (existing.exists() && existing.data().status !== 'dismissed') continue;
+                const originalPath = `${RESTAURANT_ID}/invoices/inbox_${hash}.original`;
+                const original = await new Promise((resolve, reject) => {
+                    const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file);
+                });
+                // Upload must succeed before a queue entry can reference the original.
+                await withTimeout(uploadString(storageRef(storage, originalPath), original, 'data_url', { contentType: file.type || 'application/pdf' }), 60000, 'שמירת קובץ המקור');
+                await setDoc(doc(inboxCol(), id), {
+                    status: 'pending', source, originalPath, filename: file.name,
+                    mime: file.type || 'application/pdf', contentHash: hash,
+                    mailDate: new Date().toISOString(), fields: {}, printStatus: 'needed'
+                });
+                added++;
+            }
+            showToast(added ? `${added} קבצים נוספו להמתנה לבדיקה` : 'הקבצים כבר קיימים בהמתנה או אושרו');
+            openInboxModal();
+        }
+        window.queueDeviceFiles = async function(event) {
+            const input = event.target;
+            if (input.disabled) return;
+            input.disabled = true;
+            try { await queueImportedFiles(Array.from(input.files || []), 'device'); input.value = ''; }
+            catch (e) { alert('לא כל הקבצים נוספו להמתנה. אפשר לנסות שוב בלי להכפיל קבצים שנקלטו.\n' + e.message); }
+            finally { input.disabled = false; }
+        };
         const INBOX_FILE_URL = "https://invoiceinboxfile-vngzfxix3a-uc.a.run.app";
         let inboxItems = [], inboxSeen = {}, inboxListenerOn = false, pendingInboxItem = null, inboxDupCache = {};
         let returnToInboxAfterForm = false;   // נפתח מסמך מהמייל: בסגירת הטופס חוזרים לרשימת החשבוניות מהמייל
@@ -825,7 +870,7 @@
                 b.onclick = () => openInboxModal();
                 document.body.appendChild(b);
             }
-            b.textContent = `📧 חשבוניות מהמייל (${inboxItems.length})` + (stale ? ' ⚠️' : '');
+            b.textContent = `📥 חשבוניות בהמתנה (${inboxItems.length})` + (stale ? ' ⚠️' : '');
         }
         window.openInboxModal = function() {
             if (document.getElementById('inboxModal')) return;
@@ -861,18 +906,18 @@
             const box = document.getElementById('inboxModalBox');
             if (!box) return;
             const fmt = (n) => (Number(n) || 0).toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-            let html = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><b>📧 חשבוניות מהמייל - לאישור (${inboxItems.length})</b><button type="button" onclick="closeInboxModal()" style="width:auto; margin:0; padding:4px 10px; background:#7f8c8d;">סגור</button></div>`;
+            let html = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><b>📥 חשבוניות בהמתנה - לאישור (${inboxItems.length})</b><button type="button" onclick="closeInboxModal()" style="width:auto; margin:0; padding:4px 10px; background:#7f8c8d;">סגור</button></div>`;
             if (!inboxItems.length) html += '<div style="color:#777; padding:12px;">אין חשבוניות ממתינות.</div>';
             for (const it of inboxItems) {
                 const f = it.fields || {};
                 const title = it.aiFailed ? '(לא זוהה - לבדיקה ידנית)'
-                    : esc(f.docType === 'income' ? incomeCustomerName(f) : (f.supplier || 'ספק לא מזוהה'));
+                    : esc(f.docType === 'income' ? incomeCustomerName(f) : (f.supplier || it.filename || 'ספק לא מזוהה'));
                 const kind = f.docType === 'delivery_note' ? 'תעודת משלוח' : (f.docType === 'income' ? 'חשבונית הכנסה' : 'חשבונית');
                 html += `<div style="border:1px solid #ddd; border-radius:10px; padding:8px; margin-bottom:8px;">
                     <div style="display:flex; justify-content:space-between; gap:8px;"><b>${title}</b><span>${f.amount ? fmt(f.amount) + ' ₪' : ''}</span></div>
                     <div style="font-size:0.85em; color:#555;">${kind} ${esc(f.invoiceNumber || '')} ${esc(f.invoiceDate || '')}</div>
                     <div style="font-size:0.78em; color:#888; direction:ltr; text-align:right;">${esc(it.fromEmail || '')} | ${esc(it.subject || '')}</div>
-                    <div style="font-size:0.75em; color:#888;">נקלט מ: ${esc(it.account || '')}</div>
+                    <div style="font-size:0.75em; color:#888;">מקור: ${esc(importedSourceLabel(it.source))} ${esc(it.account || '')}</div>
                     <div id="inboxDup_${esc(it.id)}" style="font-size:0.85em; color:#c0392b; font-weight:bold;"></div>
                     <div style="display:flex; gap:6px; margin-top:6px;">
                         <button type="button" onclick="openInboxItem('${esc(it.id)}')" style="margin:0; padding:6px 10px; background:#27ae60;">פתח לבדיקה ושמירה</button>
@@ -896,14 +941,34 @@
             const it = inboxItems.find(x => x.id === id);
             if (!it) return;
             try {
-                await fbAuth.authStateReady();
-                const tok = fbAuth.currentUser ? await fbAuth.currentUser.getIdToken() : '';
-                const r = await fetch(INBOX_FILE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok }, body: JSON.stringify({ id }) });
-                const j = await r.json();
-                if (!r.ok || !j.data) throw new Error(j.error || r.status);
-                const bin = atob(j.data); const u8 = new Uint8Array(bin.length);
-                for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-                const file = new File([u8], j.filename || 'invoice', { type: j.mime || 'application/octet-stream' });
+                let file;
+                if (it.originalPath && ['device', 'shared'].includes(it.source)) {
+                    const saved = await getDoc(doc(getInvoicesCollection(), it.id));
+                    if (saved.exists()) {
+                        await setDoc(doc(inboxCol(), it.id), { status: 'approved', approvedAt: new Date().toISOString() }, { merge: true });
+                        showToast('המסמך כבר נשמר; לא נוצרה כפילות.'); return;
+                    }
+                    await fbAuth.authStateReady();
+                    const tok = fbAuth.currentUser ? await fbAuth.currentUser.getIdToken() : '';
+                    let r;
+                    try {
+                        const url = await getDownloadURL(storageRef(storage, it.originalPath));
+                        r = await fetch(url); if (!r.ok) throw new Error('download failed');
+                    } catch (e) {
+                        r = await fetch(INVOICE_IMAGE_PROXY_URL + '?path=' + encodeURIComponent(it.originalPath), { headers: { Authorization: 'Bearer ' + tok } });
+                    }
+                    if (!r.ok) throw new Error('original unavailable');
+                    file = new File([await r.blob()], it.filename || 'invoice', { type: it.mime });
+                } else {
+                    await fbAuth.authStateReady();
+                    const tok = fbAuth.currentUser ? await fbAuth.currentUser.getIdToken() : '';
+                    const r = await fetch(INBOX_FILE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok }, body: JSON.stringify({ id }) });
+                    const j = await r.json();
+                    if (!r.ok || !j.data) throw new Error(j.error || r.status);
+                    const bin = atob(j.data); const u8 = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+                    file = new File([u8], j.filename || 'invoice', { type: j.mime || 'application/octet-stream' });
+                }
                 pendingInboxItem = it;
                 returnToInboxAfterForm = true;
                 closeInboxModal();
@@ -925,7 +990,7 @@
             const f = it.fields || {};
             const sameNum = String(savedNumber || '').trim() && String(savedNumber).trim() === String(f.invoiceNumber || '').trim();
             const sameAmt = Math.abs(Math.abs(Number(savedAmount) || 0) - Math.abs(Number(f.amount) || 0)) < 0.01 && (Number(f.amount) || 0) !== 0;
-            if (!sameNum && !sameAmt) return;
+            if (!it.originalPath && !sameNum && !sameAmt) return;
             pendingInboxItem = null;
             setDoc(doc(inboxCol(), it.id), { status: 'approved', approvedAt: new Date().toISOString() }, { merge: true }).catch(() => {});
         }
@@ -941,7 +1006,7 @@
             }
 
             const fileInput = document.getElementById('fileUploadInput');
-            if (fileInput) fileInput.addEventListener('change', (e) => handleScanFiles(e, 'invoice'));
+            if (fileInput) fileInput.addEventListener('change', window.queueDeviceFiles);
             const addPageInput = document.getElementById('addPageFileInput');
             if (addPageInput) addPageInput.addEventListener('change', handleAddPageFiles);
             const supplierSelectEl = document.getElementById('invoiceSupplierSelect');
@@ -1535,6 +1600,9 @@
                 await scanPreviewPromise;   // ממתין שהתמונה תתאים לעמודים שסומנו
                 const noteId = docIdForSave();
                 const data = { id: noteId, docType: 'delivery_note', supplier, invoiceNumber: noteNumber, invoiceDate: noteDate, amount, notes, monthKey, items, handwrittenNotes: keptHandwrittenNotes() };
+                if (pendingInboxItem) data.source = pendingInboxItem.source || 'email';
+                const printInput = document.getElementById('invoicePrintStatus');
+                if (printInput) data.printStatus = printInput.value;
                 if (!isUpdate) {
                     data.createdAt = Date.now();
                     if (recognizedImageBase64) data.pageCount = recognizedPageCount;
@@ -2850,7 +2918,7 @@
         }
 
         function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {
-            pendingNewDocId = null;   // טופס חדש = מסמך חדש
+            pendingNewDocId = pendingInboxItem && pendingInboxItem.originalPath ? pendingInboxItem.id : null;   // Stable ID prevents retry duplicates
             const confirmForm = document.getElementById('invoiceConfirmForm');
             const imgWrap = document.getElementById('invoicePreviewImgWrap');
             const formTitle = document.getElementById('confirmFormTitle');
@@ -2881,6 +2949,10 @@
             const amountInput = document.getElementById('invoiceAmountInput');
             const paymentInput = document.getElementById('invoicePaymentMethodInput');
             const notesInput = document.getElementById('invoiceNotesInput');
+            const printInput = document.getElementById('invoicePrintStatus');
+            if (printInput) printInput.value = existingInvoice
+                ? (existingInvoice.printStatus || (needsInvoicePrint(existingInvoice) ? 'needed' : 'not_needed'))
+                : (pendingInboxItem ? 'needed' : 'not_needed');
 
             duplicateBox.classList.add('hidden');
 
@@ -3132,7 +3204,9 @@
                     items: recognizedItemsList, handwrittenNotes: keptHandwrittenNotes()
                 };
                 // סימון מקור: חשבונית שנשמרה אחרי שנפתחה מתיבת המייל (להדפסה לרואה חשבון)
-                if (pendingInboxItem) invData.source = 'email';
+                if (pendingInboxItem) invData.source = pendingInboxItem.source || 'email';
+                const printInput = document.getElementById('invoicePrintStatus');
+                if (printInput) invData.printStatus = printInput.value;
                 if (!isUpdate) {
                     invData.createdAt = Date.now();
                     if (recognizedImageBase64) invData.pageCount = recognizedPageCount;
@@ -3227,6 +3301,20 @@
         // מציג רק את 10 החשבוניות הראשונות (לפי ספק) כדי לקצר את הגלילה; כפתור "הצג הכול" פותח את השאר
         let invoicesShown = 10, invoicesShownMonth = null;
         window.showAllInvoices = function() { invoicesShown = Infinity; renderInvoicesRows(); };
+        function invoicePrintButton(inv) {
+            const needed = needsInvoicePrint(inv);
+            return `<button class="view-img-btn" data-id="${esc(inv.id)}" onclick="toggleInvoicePrintStatus(this.dataset.id)">${needed ? 'צריך הדפסה' : (inv.printStatus === 'printed' ? 'כבר מודפס' : 'לא סומן להדפסה')} ✎</button>`;
+        }
+        window.toggleInvoicePrintStatus = async function(id) {
+            const inv = monthlyInvoices.find(x => x.id === id) || monthlyIncome.find(x => x.id === id);
+            if (!inv) return;
+            const next = needsInvoicePrint(inv) ? 'printed' : 'needed';
+            if (!await appConfirm(next === 'printed' ? 'לאשר שהחשבונית כבר הודפסה?' : 'לסמן את החשבונית להדפסה?')) return;
+            try {
+                await setDoc(doc(getInvoicesCollection(), id), { printStatus: next }, { merge: true });
+                await loadInvoicesForMonth();
+            } catch (e) { alert('הסימון לא נשמר. נסה שוב.'); }
+        };
         function renderInvoicesRows() {
             const tbody = document.getElementById('invoicesTableBody');
             if (!tbody) return;
@@ -3248,6 +3336,7 @@
                             <td>${esc(inv.notes || '-')}</td>
                             <td style="white-space:nowrap;">
                                 ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : ''}
+                                ${invoicePrintButton(inv)}
                                 <button class="edit-btn" data-id="${esc(inv.id)}" onclick="editInvoiceEntry(this.dataset.id)">ערוך</button>
                                 <button class="delete-btn" data-id="${esc(inv.id)}" onclick="deleteInvoiceEntry(this.dataset.id)">מחק</button>
                             </td>
@@ -3311,6 +3400,7 @@
                             <td>${esc(inv.notes || '-')}</td>
                             <td style="white-space:nowrap;">
                                 ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : ''}
+                                ${invoicePrintButton(inv)}
                                 <button class="edit-btn" data-id="${esc(inv.id)}" onclick="editInvoiceEntry(this.dataset.id)">ערוך</button>
                                 <button class="delete-btn" data-id="${esc(inv.id)}" onclick="deleteInvoiceEntry(this.dataset.id)">מחק</button>
                             </td>
@@ -3664,11 +3754,11 @@
         // לא משתמש ב-canvas כי תמונות מ-Firebase Storage נחסמות ב-CORS - לכן DOM + window.print.
         window.exportEmailInvoicesToPDF = async function() {
             const emailInvs = monthlyInvoices
-                .filter(i => i.source === 'email')
+                .filter(i => needsInvoicePrint(i))
                 .sort((a, b) => String(a.invoiceDate || '').localeCompare(String(b.invoiceDate || '')));
             if (emailInvs.length === 0) {
                 // הודעה בתוך הדף ולא alert - בחלק מהמכשירים alert באפליקציה מותקנת מציג דף לבן
-                showToast("אין חשבוניות מהמייל בחודש זה. חשבוניות שתאשר ותשמור מהמייל יופיעו כאן.", "err");
+                showToast("אין חשבוניות הוצאות שמסומנות להדפסה בחודש זה.", "err");
                 return;
             }
             const btn = document.getElementById('emailInvPdfBtn');
@@ -3707,7 +3797,7 @@
                 const dateTxt = inv.invoiceDate ? inv.invoiceDate.split('-').reverse().join('/') : '-';
                 const headerHtml = `
                     <div style="text-align:center; border-bottom:2px solid #2c3e50; padding-bottom:4mm; margin-bottom:6mm; font-family:Arial, sans-serif;">
-                        <div style="font-size:18pt; font-weight:bold;">חשבונית מהמייל - ${esc(inv.supplier || '')}</div>
+                        <div style="font-size:18pt; font-weight:bold;">חשבונית להדפסה - ${esc(inv.supplier || '')}</div>
                         <div style="font-size:11pt; color:#555; margin-top:2mm;">
                             מספר: <b>${esc(inv.invoiceNumber || '-')}</b>
                             &nbsp;|&nbsp; תאריך: <b>${esc(dateTxt)}</b>

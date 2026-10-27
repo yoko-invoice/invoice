@@ -154,6 +154,11 @@
                     <label>הערות:</label>
                     <input type="text" id="invoiceNotesInput" placeholder="הכללת הערה חודשית/פנימית לחשבונית...">
                 </div>
+                <div class="form-group">
+                    <label for="invoicePrintStatus">הדפסה פיזית:</label>
+                    <select id="invoicePrintStatus"><option value="needed">צריך הדפסה</option><option value="printed">כבר מודפס / יש עותק פיזי</option><option value="not_needed">לא נדרשת הדפסה כרגע</option></select>
+                    <small>פתיחת חלון ההדפסה אינה מסמנת שהמסמך הודפס. את הסימון מעדכנים לאחר ההדפסה.</small>
+                </div>
                 <div class="modal-actions">
                     <button id="saveInvoiceBtn" onclick="saveInvoiceEntry()" style="background-color:#27ae60;">שמור חשבונית</button>
                     <button onclick="cancelInvoiceEntry()" style="background-color:#7f8c8d;">ביטול</button>
@@ -381,7 +386,7 @@
             <div class="action-btns-group" style="margin-top:14px;">
                 <button class="pdf-btn" onclick="exportInvoicesToPDF()">📄 הורד דוח A4 לחודש (PDF)</button>
                 <button class="excel-btn" onclick="exportInvoicesToExcel()">📊 ייצוא לאקסל (XLSX)</button>
-                <button class="pdf-btn" id="emailInvPdfBtn" onclick="exportEmailInvoicesToPDF()" style="background-color:#2c3e50;">🖨️ הדפס חשבוניות מהמייל לרואה חשבון</button>
+                <button class="pdf-btn" id="emailInvPdfBtn" onclick="exportEmailInvoicesToPDF()" style="background-color:#2c3e50;">🖨️ הדפס חשבוניות הוצאות שממתינות להדפסה</button>
             </div>
         </div>
 

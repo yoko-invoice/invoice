@@ -861,8 +861,8 @@
         }
         function renderInboxButton() {
             let b = document.getElementById('inboxFab');
-            const stale = Object.values(inboxSeen).some(t => Date.now() - Date.parse(t) > 3 * 24 * 3600 * 1000);
-            if (!inboxItems.length && !stale) { if (b) b.remove(); return; }
+            const times = Object.values(inboxSeen).map(t => Date.parse(t)).filter(t => !isNaN(t));
+            const stale = times.some(t => Date.now() - t > 3 * 24 * 3600 * 1000);
             if (!b) {
                 b = document.createElement('button');
                 b.id = 'inboxFab'; b.type = 'button';
@@ -870,7 +870,14 @@
                 b.onclick = () => openInboxModal();
                 document.body.appendChild(b);
             }
-            b.textContent = `📥 חשבוניות בהמתנה (${inboxItems.length})` + (stale ? ' ⚠️' : '');
+            if (inboxItems.length) {
+                b.style.background = '#1877f2';
+                b.textContent = `📥 חשבוניות בהמתנה (${inboxItems.length})` + (stale ? ' ⚠️' : '');
+            } else {
+                const last = times.length ? new Date(Math.max(...times)) : null;
+                b.style.background = stale ? '#c0392b' : '#7f8c8d';
+                b.textContent = '📥 אין חשבוניות בהמתנה' + (last ? ' · בדיקה אחרונה החלה ' + last.toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' }) : '') + (stale ? ' ⚠️' : '');
+            }
         }
         window.openInboxModal = function() {
             if (document.getElementById('inboxModal')) return;
@@ -926,7 +933,7 @@
             }
             const seenTxt = Object.entries(inboxSeen).map(([k, t]) => {
                 const old = Date.now() - Date.parse(t) > 3 * 24 * 3600 * 1000;
-                return `<div style="font-size:0.75em; color:${old ? '#c0392b' : '#888'};">${old ? '⚠️ ' : ''}${esc(k)}: נבדק לאחרונה ${esc(new Date(t).toLocaleString('he-IL'))}${old ? ' - הסריקה כנראה נעצרה' : ''}</div>`;
+                return `<div style="font-size:0.75em; color:${old ? '#c0392b' : '#888'};">${old ? '⚠️ ' : ''}${esc(k)}: בדיקה אחרונה החלה ${esc(new Date(t).toLocaleString('he-IL'))}${old ? ' - הסריקה כנראה נעצרה' : ''}</div>`;
             }).join('');
             html += seenTxt;
             box.innerHTML = html;

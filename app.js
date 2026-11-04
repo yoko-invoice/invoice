@@ -1,5 +1,5 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc, getDoc, getDocs, deleteDoc, onSnapshot, query, where, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc, getDoc, getDocs, deleteDoc, deleteField, onSnapshot, query, where, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
         import { getAuth, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
         import { getStorage, ref as storageRef, uploadString, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
@@ -841,7 +841,7 @@
             finally { input.disabled = false; }
         };
         const INBOX_FILE_URL = "https://invoiceinboxfile-vngzfxix3a-uc.a.run.app";
-        let inboxItems = [], inboxSeen = {}, inboxListenerOn = false, pendingInboxItem = null, inboxDupCache = {};
+        let inboxItems = [], inboxSeen = {}, inboxFails = {}, inboxListenerOn = false, pendingInboxItem = null, inboxDupCache = {};
         let returnToInboxAfterForm = false;   // נפתח מסמך מהמייל: בסגירת הטופס חוזרים לרשימת החשבוניות מהמייל
         function inboxCol() { return collection(db, `${RESTAURANT_ID}_inbox`); }
         function startInboxListener() {
@@ -851,6 +851,7 @@
                 onSnapshot(inboxCol(), (snap) => {
                     const st = snap.docs.find(d => d.id === '_status');
                     inboxSeen = (st && st.data().seen) || {};
+                    inboxFails = (st && st.data().fails) || {};
                     inboxItems = snap.docs.filter(d => d.id !== '_status').map(d => ({ id: d.id, ...d.data() }))
                         .filter(x => x.status === 'pending')
                         .sort((a, b) => String(b.mailDate || '').localeCompare(String(a.mailDate || '')));
@@ -870,13 +871,15 @@
                 b.onclick = () => openInboxModal();
                 document.body.appendChild(b);
             }
+            const failCount = Object.keys(inboxFails).length;
+            const failTxt = failCount ? ` · ⚠️ ${failCount} נכשלו` : '';
             if (inboxItems.length) {
-                b.style.background = '#1877f2';
-                b.textContent = `📥 חשבוניות בהמתנה (${inboxItems.length})` + (stale ? ' ⚠️' : '');
+                b.style.background = failCount ? '#c0392b' : '#1877f2';
+                b.textContent = `📥 חשבוניות בהמתנה (${inboxItems.length})` + failTxt + (stale ? ' ⚠️' : '');
             } else {
                 const last = times.length ? new Date(Math.max(...times)) : null;
-                b.style.background = stale ? '#c0392b' : '#7f8c8d';
-                b.textContent = '📥 אין חשבוניות בהמתנה' + (last ? ' · בדיקה אחרונה החלה ' + last.toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' }) : '') + (stale ? ' ⚠️' : '');
+                b.style.background = (stale || failCount) ? '#c0392b' : '#7f8c8d';
+                b.textContent = '📥 אין חשבוניות בהמתנה' + (last ? ' · בדיקה אחרונה החלה ' + last.toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' }) : '') + failTxt + (stale ? ' ⚠️' : '');
             }
         }
         window.openInboxModal = function() {
@@ -914,6 +917,22 @@
             if (!box) return;
             const fmt = (n) => (Number(n) || 0).toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             let html = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><b>📥 חשבוניות בהמתנה - לאישור (${inboxItems.length})</b><button type="button" onclick="closeInboxModal()" style="width:auto; margin:0; padding:4px 10px; background:#7f8c8d;">סגור</button></div>`;
+            const failIds = Object.keys(inboxFails);
+            if (failIds.length) {
+                html += `<div style="border:1px solid #e6b0aa; background:#fdedec; border-radius:10px; padding:8px; margin-bottom:10px;">` +
+                    `<b style="color:#c0392b;">⚠️ חשבוניות שלא הצלחנו להוריד (${failIds.length})</b>`;
+                for (const id of failIds) {
+                    const x = inboxFails[id] || {};
+                    html += `<div style="border-top:1px solid #e6b0aa; margin-top:6px; padding-top:6px;">
+                        <div style="font-size:0.9em;"><b>${esc(x.subject || 'מייל ללא נושא')}</b></div>
+                        <div style="font-size:0.78em; color:#888; direction:ltr; text-align:right;">${esc(x.fromEmail || x.from || '')}</div>
+                        <div style="font-size:0.75em; color:#888;">מקור: מהמייל ${esc(x.account || '')} · ${esc(x.mailDate || '')}</div>
+                        <div style="font-size:0.85em; color:#c0392b;">ניסינו להוריד 5 פעמים ולא הצלחנו. אפשר להוריד את החשבונית ידנית מהמייל ולהעלות אותה כאן.</div>
+                        <button type="button" onclick="dismissInboxFail('${esc(id)}')" style="width:auto; margin:6px 0 0; padding:4px 10px; background:#95a5a6;">התעלם</button>
+                    </div>`;
+                }
+                html += '</div>';
+            }
             if (!inboxItems.length) html += '<div style="color:#777; padding:12px;">אין חשבוניות ממתינות.</div>';
             for (const it of inboxItems) {
                 const f = it.fields || {};
@@ -943,6 +962,11 @@
             if (!await appConfirm("להתעלם מהמסמך הזה? הוא יוסר מהרשימה.")) return;
             try { await setDoc(doc(inboxCol(), id), { status: 'dismissed', dismissedAt: new Date().toISOString() }, { merge: true }); }
             catch (e) { alert("הפעולה נכשלה, נסה שוב."); }
+        };
+        window.dismissInboxFail = async function(id) {
+            if (!await appConfirm('להסיר את ההתראה על ההורדה שנכשלה?')) return;
+            try { await setDoc(doc(inboxCol(), '_status'), { fails: { [id]: deleteField() } }, { merge: true }); }
+            catch (e) { alert('הפעולה נכשלה, נסה שוב.'); }
         };
         window.openInboxItem = async function(id) {
             const it = inboxItems.find(x => x.id === id);

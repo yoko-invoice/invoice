@@ -329,12 +329,13 @@
         <div class="card" style="border: 2px solid #34495e;">
             <h3 style="margin-top:0; color:#34495e;">📋 דוח ספקים חודשי מסוכם (ניתן לעריכה ישירה)</h3>
             <p style="font-size:0.8em; color:#555; margin:-4px 0 8px 0;">חשבונית עם "חיצוני" באמצעי התשלום נשמרת ומודפסת כרגיל, אבל לא נספרת בסכומי הדוח כי לא שולמה מהעסק.</p>
+            <button type="button" id="reorderToggleBtn" class="reorder-toggle" onclick="toggleReportReorder()">↕️ שנה סדר</button>
             <div class="table-wrapper">
-                <table>
+                <table id="editableReportTable">
                     <thead>
                         <tr style="background:#34495e; color:white;">
                             <th>שם הספק</th>
-                            <th>סכום לתשלום / זיכוי (₪)</th>
+                            <th><span class="th-full">סכום לתשלום / זיכוי (₪)</span><span class="th-short">סכום (₪)</span></th>
                             <th>אמצעי תשלום</th>
                             <th>הערות</th>
                         </tr>
@@ -466,3 +467,4 @@
     <script src="fold-cards.js"></script>
 </body>
 </html>
+

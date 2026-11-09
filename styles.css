@@ -144,6 +144,48 @@
 .mv-btn { width: auto; margin: 0; padding: 4px 10px; font-size: 0.9em; line-height: 1; background-color: #34495e; }
 .mv-btn:disabled { opacity: 0.3; cursor: default; }
 
+        /* דוח ספקים: עטיפת חיצי הסידור (במקום סגנון inline, כדי ש-CSS יוכל להסתיר אותם בנייד) */
+        .mv-wrap { display: flex; gap: 4px; flex-shrink: 0; }
+        /* שדות אמצעי תשלום/הערות בדוח: textarea שגדל לפי התוכן ונראה כמו הקלט השקוף הקודם,
+           כך שטקסט ארוך יורד שורה ונראה במלואו במקום להיחתך */
+        .editable-cell textarea {
+            border: 1px solid transparent; background: transparent; text-align: center;
+            width: 100%; font-size: inherit; font-family: inherit; color: inherit;
+            padding: 4px; resize: none; overflow: hidden; box-sizing: border-box; line-height: 1.35;
+        }
+        .editable-cell textarea:focus { border: 1px solid #1877f2; background: #fff; border-radius: 4px; outline: none; }
+        /* כותרת מקוצרת וכפתור מצב סידור - מוסתרים בדסקטופ */
+        .th-short { display: none; }
+        .reorder-toggle { display: none; }
+
+        @media (max-width: 600px) {
+            /* ניצול השוליים בצדדים + שטח גלילה מתחת לכפתור הצף */
+            body { padding: 2px 2px 76px; }
+            .card { padding: 6px; }
+            .reorder-toggle { display: block; width: auto; margin: 0 0 6px; padding: 6px 12px; background: #ecf0f1; color: #2c3e50; font-size: 0.85em; font-weight: normal; }
+            #editableReportTable { table-layout: fixed; margin-top: 0; }
+            #editableReportTable th, #editableReportTable td { padding: 6px 2px; }
+            #editableReportTable th:nth-child(1), #editableReportTable td:nth-child(1) { width: 28%; }
+            #editableReportTable th:nth-child(2), #editableReportTable td:nth-child(2) { width: 24%; }
+            #editableReportTable th:nth-child(3), #editableReportTable td:nth-child(3) { width: 24%; }
+            #editableReportTable th:nth-child(4), #editableReportTable td:nth-child(4) { width: 24%; }
+            #editableReportTable .editable-cell input[type="number"] { padding: 4px 0; }
+            /* בנייד חיצי הסטפר של שדה המספר תופסים רוחב שחסר - מסתירים אותם רק בטבלה זו */
+            #editableReportTable .editable-cell input[type="number"]::-webkit-outer-spin-button,
+            #editableReportTable .editable-cell input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+            #editableReportTable .th-full { display: none; }
+            #editableReportTable .th-short { display: inline; }
+            #editableReportTable .rep-name { overflow-wrap: anywhere; }
+            #editableReportTable .mv-wrap { display: none; }
+            #editableReportTable.reorder-on .mv-wrap { display: flex; }
+            /* במצב סידור: החיצים מתחת לשם הספק (לא לידו), כדי שהשם לא ישבר באמצע מילים */
+            #editableReportTable.reorder-on td:first-child > div { flex-direction: column; align-items: stretch; gap: 4px; }
+            #editableReportTable.reorder-on .mv-wrap { justify-content: center; }
+            #editableReportTable .mv-btn { padding: 2px 6px; font-size: 0.85em; }
+            #editableReportTable .editable-cell input, #editableReportTable .editable-cell textarea { padding: 4px 2px; }
+            #editableReportTable .editable-cell textarea { text-align: right; }
+        }
+
         /* עמודת פעולות בטבלאות: עמודות קבועות, כל כפתור תמיד באותו מקום */
         .act-cell { white-space: nowrap; }
         .act-grid { display: grid; width: 100%; justify-content: end; grid-template-columns: 78px 124px 50px 50px; gap: 4px; direction: rtl; align-items: center; }
@@ -153,3 +195,4 @@
         #invoicesTableBody tr:nth-child(odd) > td, #incomeTableBody tr:nth-child(odd) > td { background-color: #ffffff; }
         #invoicesTableBody tr:nth-child(even) > td, #incomeTableBody tr:nth-child(even) > td { background-color: #eceff3; }
         #invoicesTableBody tr.credit-row > td { background-color: #fff5f5; }
+

@@ -873,13 +873,22 @@
             }
             const failCount = Object.keys(inboxFails).length;
             const failTxt = failCount ? ` · ⚠️ ${failCount} נכשלו` : '';
+            // בנייד: טקסט קצר כדי שהכפתור הצף לא יכסה שורות מהטבלה. הפירוט המלא (3 תיבות) נשאר בחלון הקופץ.
+            const mob = window.matchMedia('(max-width: 600px)').matches;
+            b.style.padding = mob ? '8px 10px' : '10px 14px';
+            b.style.fontSize = mob ? '0.85em' : '0.95em';
             if (inboxItems.length) {
                 b.style.background = failCount ? '#c0392b' : '#1877f2';
-                b.textContent = `📥 חשבוניות בהמתנה (${inboxItems.length})` + failTxt + (stale ? ' ⚠️' : '');
+                b.textContent = mob
+                    ? `📥 בהמתנה (${inboxItems.length})` + failTxt + (stale ? ' ⚠️' : '')
+                    : `📥 חשבוניות בהמתנה (${inboxItems.length})` + failTxt + (stale ? ' ⚠️' : '');
             } else {
                 const last = times.length ? new Date(Math.max(...times)) : null;
+                const lastShort = last ? last.toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' }) : '';
                 b.style.background = (stale || failCount) ? '#c0392b' : '#7f8c8d';
-                b.textContent = '📥 אין חשבוניות בהמתנה' + (last ? ' · בדיקה אחרונה החלה ' + last.toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' }) : '') + failTxt + (stale ? ' ⚠️' : '');
+                b.textContent = mob
+                    ? '📥 אין בהמתנה' + (last ? ' · ' + lastShort : '') + failTxt + (stale ? ' ⚠️' : '')
+                    : '📥 אין חשבוניות בהמתנה' + (last ? ' · בדיקה אחרונה החלה ' + lastShort : '') + failTxt + (stale ? ' ⚠️' : '');
             }
         }
         window.openInboxModal = function() {
@@ -3527,14 +3536,17 @@
                 return;
             }
 
+            // בנייד בלבד: שדות אמצעי תשלום/הערות הם textarea שנמתח לפי התוכן (טקסט ארוך יורד שורה ולא נחתך).
+            // בדסקטופ נשאר input רגיל כדי שהתצוגה תהיה זהה לחלוטין למה שהיה.
+            const isMobileReport = window.matchMedia('(max-width: 600px)').matches;
             reportTbody.innerHTML = rows.map((r, idx) => {
                 const isCredit = Number(r.amount) < 0;
                 return `
                     <tr>
                         <td style="font-weight:bold; background:#fafafa;">
                             <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
-                                <span>${esc(r.name)}</span>
-                                <span style="display:flex; gap:4px; flex-shrink:0;">
+                                <span class="rep-name">${esc(r.name)}</span>
+                                <span class="mv-wrap">
                                     <button type="button" class="mv-btn" aria-label="העלה למעלה" ${idx === 0 ? 'disabled' : ''} onclick="moveReportRow(${idx}, -1)">▲</button>
                                     <button type="button" class="mv-btn" aria-label="הורד למטה" ${idx === rows.length - 1 ? 'disabled' : ''} onclick="moveReportRow(${idx}, 1)">▼</button>
                                 </span>
@@ -3546,15 +3558,18 @@
                                 style="${isCredit ? 'color:red; font-weight:bold;' : ''}">
                         </td>
                         <td class="editable-cell">
-                            <input type="text" value="${esc(r.method)}" 
-                                onchange="updateReportEdit('${esc(r.name)}', 'method', this.value)">
+                            ${isMobileReport
+                                ? `<textarea rows="1" oninput="autoGrowReportCell(this)" onchange="updateReportEdit('${esc(r.name)}', 'method', this.value)">${esc(r.method)}</textarea>`
+                                : `<input type="text" value="${esc(r.method)}" onchange="updateReportEdit('${esc(r.name)}', 'method', this.value)">`}
                         </td>
                         <td class="editable-cell">
-                            <input type="text" value="${esc(r.notes)}" 
-                                onchange="updateReportEdit('${esc(r.name)}', 'notes', this.value)">
+                            ${isMobileReport
+                                ? `<textarea rows="1" oninput="autoGrowReportCell(this)" onchange="updateReportEdit('${esc(r.name)}', 'notes', this.value)">${esc(r.notes)}</textarea>`
+                                : `<input type="text" value="${esc(r.notes)}" onchange="updateReportEdit('${esc(r.name)}', 'notes', this.value)">`}
                         </td>
                     </tr>`;
             }).join('');
+            if (isMobileReport) reportTbody.querySelectorAll('textarea').forEach(autoGrowReportCell);
 
             if (totalCell) {
                 totalCell.innerText = `${total.toFixed(2)} ₪`;
@@ -3588,6 +3603,34 @@
                 console.warn("שמירת סדר הספקים נכשלה:", e);
                 showToast("⚠️ שמירת הסדר החדש נכשלה - נסה שוב.", "err");
             }
+        };
+
+        // שדות אמצעי תשלום/הערות בדוח הספקים: textarea שגדל לפי התוכן, כדי שטקסט ארוך נראה במלואו ולא נחתך
+        window.autoGrowReportCell = function(el) {
+            if (!el) return;
+            el.style.height = 'auto';
+            el.style.height = el.scrollHeight + 'px';
+        };
+        // מעבר בין נייד לדסקטופ (סיבוב/שינוי חלון): מרנדר מחדש כדי להחליף input<->textarea; באותו מצב רק מעדכן גבהים
+        let reportLastMobile = window.matchMedia('(max-width: 600px)').matches;
+        window.addEventListener('resize', () => {
+            const mob = window.matchMedia('(max-width: 600px)').matches;
+            if (mob !== reportLastMobile) {
+                reportLastMobile = mob;
+                renderEditableReportTable();
+            } else if (mob) {
+                document.querySelectorAll('#editableReportTable textarea').forEach(autoGrowReportCell);
+            }
+        });
+
+        // מצב "עריכת סדר" בדוח הספקים: החיצים מוסתרים בדרך כלל (בנייד) כדי לפנות רוחב לטקסט,
+        // ומוצגים רק אחרי לחיצה על הכפתור. בדסקטופ הכפתור מוסתר ב-CSS והחיצים גלויים תמיד.
+        window.toggleReportReorder = function() {
+            const tbl = document.getElementById('editableReportTable');
+            const btn = document.getElementById('reorderToggleBtn');
+            if (!tbl) return;
+            const on = tbl.classList.toggle('reorder-on');
+            if (btn) btn.textContent = on ? '✅ סיום סידור' : '↕️ שנה סדר';
         };
 
         window.updateReportEdit = function(supplierName, field, value) {
@@ -4456,3 +4499,4 @@
         })();
 
         initRestaurantId();
+

@@ -1,4 +1,4 @@
-const CACHE = 'invoices-v30';
+const CACHE = 'invoices-v31';
 
 // קבצי האפליקציה (חובה לעבודה אופליין)
 const CORE = [
@@ -96,3 +96,4 @@ self.addEventListener('fetch', (e) => {
       .catch(() => caches.match(req, { ignoreSearch: true }).then((m) => m || (req.mode === 'navigate' ? caches.match('index.html') : Response.error())))
   );
 });
+

@@ -1021,7 +1021,9 @@
             const f = it.fields || {};
             const sameNum = String(savedNumber || '').trim() && String(savedNumber).trim() === String(f.invoiceNumber || '').trim();
             const sameAmt = Math.abs(Math.abs(Number(savedAmount) || 0) - Math.abs(Number(f.amount) || 0)) < 0.01 && (Number(f.amount) || 0) !== 0;
-            if (!it.originalPath && !sameNum && !sameAmt) return;
+            // פריט שהזיהוי האוטומטי לא קרא (אין מספר וסכום): המשתמש פתח אותו במפורש לבדיקה ושמירה, לכן שמירה מוצלחת סוגרת אותו
+            const noExtracted = !String(f.invoiceNumber || '').trim() && !(Number(f.amount) || 0);
+            if (!it.originalPath && !sameNum && !sameAmt && !noExtracted) return;
             pendingInboxItem = null;
             setDoc(doc(inboxCol(), it.id), { status: 'approved', approvedAt: new Date().toISOString() }, { merge: true }).catch(() => {});
         }

@@ -196,3 +196,11 @@
         #invoicesTableBody tr:nth-child(even) > td, #incomeTableBody tr:nth-child(even) > td { background-color: #eceff3; }
         #invoicesTableBody tr.credit-row > td { background-color: #fff5f5; }
 
+
+/* Monthly invoice print: whole source pages, compact app header. */
+@media print {
+    body { margin: 0 !important; padding: 0 !important; background: white !important; overflow: visible !important; width: auto !important; }
+    #emailPrintArea { color: #111; }
+    #emailPrintArea .email-print-page { break-inside: avoid; page-break-inside: avoid; margin: 0; padding: 0; }
+    #emailPrintArea .email-print-slice img { max-height: none !important; }
+}

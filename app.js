@@ -2530,6 +2530,14 @@
             return merged;
         }
 
+        // Keep exact scan-page geometry alongside its generated image until upload completes.
+        const scanPrintLayouts = new Map();
+        function rememberPrintLayout(image, layout) {
+            scanPrintLayouts.set(image, layout);
+            while (scanPrintLayouts.size > 4) scanPrintLayouts.delete(scanPrintLayouts.keys().next().value);
+            return image;
+        }
+
         // תמונת תצוגה מקדימה: עמוד אחד כמו שהוא, או כל העמודים מודבקים אנכית
         async function buildScanPreview(pages) {
             if (pages.length === 1) return `data:image/jpeg;base64,${pages[0]}`;
@@ -2553,7 +2561,9 @@
                 ctx.drawImage(im, 0, y, W, heights[i]);
                 y += heights[i] + GAP;
             });
-            return canvas.toDataURL('image/jpeg', 0.7);
+            let row = 0;
+            const regions = heights.map(h => { const r = { y: row, h }; row += h + GAP; return r; });
+            return rememberPrintLayout(canvas.toDataURL('image/jpeg', 0.7), { v: 1, w: W, h: canvas.height, regions });
         }
 
         // פונקציה משותפת: מקבלת רשימת עמודים (base64 בלי הפריפיקס data:) ושולחת כל עמוד לזיהוי AI
@@ -2920,7 +2930,7 @@
                         const imgRef = storageRef(storage, `${RESTAURANT_ID}/invoices/${fileName}`);
                         await withTimeout(uploadString(imgRef, dataUrl, 'data_url', { cacheControl: 'no-cache' }), 30000, "העלאת תמונה");
                         const imageUrl = await withTimeout(getDownloadURL(imgRef), 15000, "קבלת קישור לתמונה");
-                        await ackOrQueue(setDoc(doc(getInvoicesCollection(), id), { imageUrl, updatedAt: Date.now() }, { merge: true }), 20000, "עדכון התמונה");
+                        await ackOrQueue(setDoc(doc(getInvoicesCollection(), id), { imageUrl, printLayout: null, updatedAt: Date.now() }, { merge: true }), 20000, "עדכון התמונה");
                         if (editCropInvoice) editCropInvoice.imageUrl = imageUrl;
                         // אם סוג המסמך הומר מתישהו, ייתכן שהתמונה הישנה ישבה בנתיב של הסוג הקודם - מנקים אותה
                         try { await deleteObject(storageRef(storage, `${RESTAURANT_ID}/invoices/${(editingOriginalKind === 'delivery' ? id : 'dn_' + id)}.jpg`)); } catch (e) { /* לא קריטי */ }
@@ -3265,12 +3275,13 @@
                 // החשבונית עצמה כבר נשמרה בהצלחה והתמונה פשוט לא תצורף אליה.
                 if (recognizedImageBase64) {
                     const imgToUpload = recognizedImageBase64;
+                    const printLayout = scanPrintLayouts.get(imgToUpload) || null;
                     (async () => {
                         try {
                             const imgRef = storageRef(storage, `${RESTAURANT_ID}/invoices/${invoiceId}.jpg`);
                             await withTimeout(uploadString(imgRef, imgToUpload, 'data_url'), 30000, "העלאת תמונה");
                             const imageUrl = await withTimeout(getDownloadURL(imgRef), 15000, "קבלת קישור לתמונה");
-                            await setDoc(doc(getInvoicesCollection(), invoiceId), { imageUrl }, { merge: true });
+                            await setDoc(doc(getInvoicesCollection(), invoiceId), { imageUrl, printLayout }, { merge: true });
                             if (getSelectedInvoiceMonth() === monthKey) loadInvoicesForMonth();
                         } catch (imgErr) {
                             console.warn("שמירת תמונת החשבונית נכשלה/נמשכה זמן רב מדי, החשבונית נשמרה בלי תמונה:", imgErr);
@@ -3823,6 +3834,64 @@
             }
         };
 
+        async function invoicePrintRegions(inv, dims) {
+            const layout = inv.printLayout;
+            if (layout && layout.v === 1 && layout.w === dims.w && layout.h === dims.h && Array.isArray(layout.regions) && layout.regions.length) {
+                let end = 0;
+                const valid = layout.regions.every(r => {
+                    const ok = Number.isInteger(r.y) && Number.isInteger(r.h) && r.y >= end && r.y - end <= 10 && r.h > 0 && r.y + r.h <= dims.h;
+                    end = r.y + r.h; return ok;
+                });
+                if (valid && layout.regions[0].y === 0 && end === dims.h) return layout.regions;
+            }
+            const n = Number(inv.pageCount) || 1;
+            const joined = n > 1 || ([600, 800].includes(dims.w) && dims.h / dims.w > 1.9);
+            if (!joined) return [{ y: 0, h: dims.h }];
+            let src = inv.imageUrl, revoke = false;
+            try {
+                if (!/^(data:|blob:)/.test(src)) {
+                    const r = await fetch(src + (src.includes('?') ? '&' : '?') + 'printcb=' + Date.now(), {
+                        mode: 'cors', credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(20000)
+                    });
+                    if (!r.ok) throw new Error('image HTTP ' + r.status);
+                    src = URL.createObjectURL(await r.blob());
+                    revoke = true;
+                }
+                const im = await loadCropImgEl(src);
+                const canvas = document.createElement('canvas');
+                canvas.width = im.naturalWidth; canvas.height = im.naturalHeight;
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                ctx.drawImage(im, 0, 0);
+                const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                const gaps = []; let start = -1;
+                for (let y = 0; y <= canvas.height; y++) {
+                    let count = 0, samples = 0;
+                    if (y < canvas.height) for (let x = 0; x < canvas.width; x += 4) {
+                        const i = (y * canvas.width + x) * 4;
+                        const r = data[i], g = data[i + 1], b = data[i + 2], mean = (r + g + b) / 3;
+                        samples++;
+                        if (Math.max(r,g,b) - Math.min(r,g,b) <= 8 && mean >= 190 && mean <= 217) count++;
+                    }
+                    const grey = samples > 0 && count / samples >= 0.98;
+                    if (grey && start < 0) start = y;
+                    if (!grey && start >= 0) {
+                        // Six-pixel JPEG separator; keep compression fringe with its source page.
+                        if (y - start >= 2 && y - start <= 10 && start > canvas.width * 0.4 && y < canvas.height - canvas.width * 0.4)
+                            gaps.push({ start, end: y });
+                        start = -1;
+                    }
+                }
+                if (!gaps.length || (n > 1 && gaps.length !== n - 1)) throw new Error('ambiguous source page boundaries');
+                const regions = []; let y = 0;
+                for (const gap of gaps) {
+                    if (gap.start - y < canvas.width * 0.4) throw new Error('ambiguous source page size');
+                    regions.push({ y, h: gap.start - y }); y = gap.end;
+                }
+                regions.push({ y, h: canvas.height - y });
+                return regions;
+            } finally { if (revoke) URL.revokeObjectURL(src); }
+        }
+
         // הדפסת חשבוניות שהגיעו מהמייל (אושרו ונשמרו) לרואה החשבון:
         // פותח את חלון ההדפסה עם כל חשבוניות החודש מהמייל - עמוד A4 לכל חשבונית
         // (מסמך רב-עמודי מתחלק לעמודים נפרדים), כותרת עם ספק, מספר, תאריך וסכום.
@@ -3846,8 +3915,6 @@
             const monthTitle = `חודש: ${monthNames[parseInt(mm)-1]} ${yy}`;
 
             const PAGE_W_MM = 180;        // רוחב התוכן בעמוד A4
-            const SLICE_H_MM = 240;       // גובה מקטע תמונה בעמוד המשך
-            const FIRST_SLICE_H_MM = 215; // המקטע הראשון קצר יותר - משאיר מקום לכותרת
 
             let area = document.getElementById('emailPrintArea');
             if (area) area.remove();
@@ -3856,6 +3923,7 @@
 
             const waitImgs = [];
             let noImgCount = 0;
+            const legacyPrintInvoices = [];
 
             const loadOne = (url) => new Promise((resolve) => {
                 const im = new Image();
@@ -3872,14 +3940,14 @@
                 const isCredit = amt < 0;
                 const dateTxt = inv.invoiceDate ? inv.invoiceDate.split('-').reverse().join('/') : '-';
                 const headerHtml = `
-                    <div style="text-align:center; border-bottom:2px solid #2c3e50; padding-bottom:4mm; margin-bottom:6mm; font-family:Arial, sans-serif;">
-                        <div style="font-size:18pt; font-weight:bold;">חשבונית להדפסה - ${esc(inv.supplier || '')}</div>
-                        <div style="font-size:11pt; color:#555; margin-top:2mm;">
+                    <div style="text-align:center; border-bottom:2px solid #2c3e50; padding-bottom:1mm; margin-bottom:2mm; font-family:Arial, sans-serif; line-height:1.15;">
+                        <div style="font-size:10pt; font-weight:bold;">חשבונית להדפסה - ${esc(inv.supplier || '')}</div>
+                        <div style="font-size:8pt; color:#555; margin-top:0.5mm;">
                             מספר: <b>${esc(inv.invoiceNumber || '-')}</b>
                             &nbsp;|&nbsp; תאריך: <b>${esc(dateTxt)}</b>
                             &nbsp;|&nbsp; סכום: <b style="${isCredit ? 'color:red;' : ''}">${amt.toFixed(2)} \u20AA${isCredit ? ' (זיכוי)' : ''}</b>
                         </div>
-                        <div style="font-size:9pt; color:#999; margin-top:1mm;">${monthTitle} | חשבונית ${idx + 1} מתוך ${emailInvs.length}</div>
+                        <div style="font-size:7pt; color:#777; margin-top:0.5mm;">${monthTitle} | חשבונית ${idx + 1} מתוך ${emailInvs.length}</div>
                     </div>`;
 
                 const dims = inv.imageUrl ? await loadOne(inv.imageUrl) : null;
@@ -3893,35 +3961,50 @@
                     continue;
                 }
 
-                let imgW = PAGE_W_MM;
-                let dispH = dims.h / dims.w * imgW;   // גובה התמונה במ"מ ברוחב העמוד
-                // מסמך בגובה של עמוד אחד בערך: מכווצים מעט כדי שהכותרת והמסמך ייכנסו לאותו עמוד
-                if (dispH > FIRST_SLICE_H_MM && dispH <= FIRST_SLICE_H_MM * 1.2) {
-                    imgW = imgW * (FIRST_SLICE_H_MM / dispH);
-                    dispH = FIRST_SLICE_H_MM;
+                let regions;
+                try {
+                    regions = await invoicePrintRegions(inv, dims);
+                } catch (e) {
+                    // Preserve the prior continuous-image print path for unrecovered legacy scans.
+                    // Never guess equal page heights. Ask before printing this known limitation.
+                    legacyPrintInvoices.push(inv.invoiceNumber || inv.supplier || String(idx + 1));
+                    console.warn('using legacy continuous image pagination', e);
+                    regions = [];
+                    const fullH = dims.h / dims.w * PAGE_W_MM;
+                    let consumed = 0;
+                    while (consumed < fullH - 0.01) {
+                        const sliceH = Math.min(regions.length ? 240 : 215, fullH - consumed);
+                        regions.push({ y: consumed * dims.w / PAGE_W_MM, h: sliceH * dims.w / PAGE_W_MM, continuous: true });
+                        consumed += sliceH;
+                    }
                 }
-                let consumed = 0, sliceIdx = 0;
-                while (consumed < dispH - 1) {
-                    const isFirst = sliceIdx === 0;
-                    const sliceH = Math.min(isFirst ? FIRST_SLICE_H_MM : SLICE_H_MM, dispH - consumed);
+                for (let pageIdx = 0; pageIdx < regions.length; pageIdx++) {
+                    const region = regions[pageIdx];
+                    const isFirst = pageIdx === 0;
+                    // Each source page stays whole. No content-based trimming or empty-page deletion.
+                    const maxH = isFirst ? 263 : 273;
+                    const imgW = region.continuous ? PAGE_W_MM : Math.min(PAGE_W_MM, maxH * dims.w / region.h);
+                    const dispH = region.h * imgW / dims.w;
                     const page = document.createElement('div');
                     page.className = 'email-print-page';
                     if (isFirst) page.innerHTML = headerHtml;
                     const wrap = document.createElement('div');
                     wrap.className = 'email-print-slice';
-                    wrap.style.cssText = `overflow:hidden; height:${sliceH}mm; text-align:center;`;
+                    wrap.style.cssText = `overflow:hidden; position:relative; height:${dispH}mm; width:${imgW}mm; margin:0 auto;`;
                     const img = document.createElement('img');
                     img.src = inv.imageUrl;
-                    img.style.cssText = `width:${imgW}mm; height:auto; display:inline-block; margin-top:-${consumed}mm;`;
+                    img.style.cssText = `position:absolute; left:0; top:-${region.y * imgW / dims.w}mm; width:${imgW}mm; max-width:none; height:auto; display:block;`;
                     wrap.appendChild(img);
                     page.appendChild(wrap);
                     area.appendChild(page);
                     waitImgs.push(img);
-                    consumed += sliceH;
-                    sliceIdx++;
                 }
             }
 
+            if (legacyPrintInvoices.length && !await appConfirm(`למסמכים הבאים עדיין אין חלוקת עמודים משוחזרת: ${legacyPrintInvoices.join(', ')}. הם יודפסו בשיטה הישנה, כולל כל התוכן, וייתכנו דפי המשך עם פס בלבד. להמשיך בהדפסה?`)) {
+                if (btn) { btn.disabled = false; btn.innerText = origText; }
+                return;
+            }
             document.body.appendChild(area);
             const cleanup = () => {
                 const a = document.getElementById('emailPrintArea');

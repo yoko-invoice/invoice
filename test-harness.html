@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ניהול חשבוניות חודשי</title>
+
+    <link rel="manifest" href="manifest.json">
+
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="חשבוניות">
+    <meta name="theme-color" content="#1877f2">
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <link rel="apple-touch-icon" href="icon-192.png">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="imgViewerOverlay" class="hidden">
+    <div class="iv-bar"><button class="iv-close" onclick="closeImageViewer()">✕ סגור</button></div>
+    <div class="iv-body"><img id="imgViewerImg" alt=""></div>
+</div>
+<!-- מודאל חיתוך ידני: גרירת 4 פינות על התמונה וגזירה עם יישור -->
+<div id="cropModalOverlay" class="hidden">
+    <div class="iv-bar">
+        <button class="iv-close crop-ok" onclick="confirmManualCrop()">✓ חתוך</button>
+        <button class="iv-close" onclick="resetManualCrop()">↺ איפוס</button>
+        <button class="iv-close" onclick="closeManualCrop()">✕ ביטול</button>
+    </div>
+    <div id="cropModalBody"><canvas id="cropModalCanvas"></canvas></div>
+</div>
+<!-- מודאל מצלמה חיה לצילום תמונה בודדת -->
+    <div id="cameraModalOverlay" class="hidden">
+        <video id="cameraModalVideo" autoplay playsinline muted poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" style="opacity:0; transition:opacity 0.2s;"></video>
+        <div id="cameraModalError" class="hidden"></div>
+        <div id="cameraModalControls">
+            <button onclick="capturePhotoFromCamera()" style="background-color:#27ae60;">📸 צלם</button>
+            <button id="cameraTorchBtn" type="button" style="background-color:#f39c12; visibility:hidden;">🔦 פנס</button>
+            <button onclick="closeCameraModal()" style="background-color:#7f8c8d;">ביטול</button>
+        </div>
+    </div>
+    <canvas id="cameraModalCanvas" class="hidden"></canvas>
+
+
+    <div class="restaurant-tag" id="restaurantTag"></div>
+    <h1>מערכת ניהול חשבוניות חודשי</h1>
+
+    <!-- מסך נעילה -->
+    <div class="card" id="lockedView">
+        <h2>הגנת סיסמה למנהל</h2>
+        <button id="bioLoginBtn" class="hidden" onclick="unlockWithBiometric()" style="background-color:#8e44ad; max-width:260px; margin:0 auto 8px;">🔐 כניסה בטביעת אצבע</button>
+        <button onclick="unlockApp()" style="background-color:#27ae60; max-width:260px; margin:0 auto;">כניסה</button>
+    </div>
+
+    <!-- מסך ראשי -->
+    <div class="hidden" id="mainView">
+        
+        <div class="card">
+            <div class="form-group">
+                <label>בחירת חודש:</label>
+                <input type="month" id="invoiceMonthSelect">
+            </div>
+
+            <div class="form-group">
+                <label>צילום / העלאת מסמך:</label>
+                <div style="display:flex; gap:8px;">
+                    <button type="button" class="upload-tile" data-recognition-trigger onclick="openCameraModal()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                        <span>צלם</span>
+                    </button>
+                    <button type="button" class="upload-tile" data-recognition-trigger onclick="document.getElementById('fileUploadInput').click()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        <span>העלה קובץ</span>
+                    </button>
+                </div>
+                <input type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif,.pdf,application/pdf" id="fileUploadInput" class="hidden" multiple>
+                <p style="font-size:0.75em; color:#777; margin:4px 0 0 0;">אפשר לבחור כמה תמונות, או PDF (עד 8 עמודים).</p>
+            </div>
+
+            <div class="hidden" id="invoiceRecognizing">⏳ מעבד את המסמך, אנא המתן...</div>
+
+            <div class="hidden" id="invoiceConfirmForm" style="margin-top:10px;">
+                <h4 id="confirmFormTitle" style="margin-bottom:8px;">אישור ואימות חשבונית</h4>
+                <div id="duplicateWarningBox" class="duplicate-warning hidden">⚠️ אזהרה: נראית חשבונית זו כבר קיימת במערכת!</div>
+                <div id="mismatchWarningBox" class="duplicate-warning hidden" style="background:#fff3cd; border-color:#ffeeba; color:#856404;">⚠️ סכום הפריטים לא תואם לסכום הכולל - בדוק מול החשבונית.</div>
+                <div id="priceAlertBox" class="hidden" style="border-radius:8px; padding:8px; margin-bottom:8px; font-size:0.85em; text-align:right;"></div>
+                <p style="font-size:0.8em; color:#555; margin:0 0 8px 0;"><b>בדוק את הפרטים</b> לפני השמירה (זיהוי AI עלול לטעות):</p>
+                <div id="invoicePreviewImgWrap" style="text-align:center; margin-bottom:10px;"></div>
+                <div id="pageSelectorBox" class="hidden" style="margin-bottom:10px;"></div>
+                <div id="addPagesRow" class="hidden" style="margin-bottom:10px;">
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" data-recognition-trigger onclick="startAddPageCamera()" style="flex:1; padding:8px; font-size:0.85em; background:#fff; color:#1877f2; border:1px solid #1877f2; border-radius:8px;">📷 הוסף עמוד (צילום)</button>
+                        <button type="button" data-recognition-trigger onclick="document.getElementById('addPageFileInput').click()" style="flex:1; padding:8px; font-size:0.85em; background:#fff; color:#1877f2; border:1px solid #1877f2; border-radius:8px;">📎 הוסף עמוד (קובץ)</button>
+                    </div>
+                    <input type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif,.pdf,application/pdf" id="addPageFileInput" class="hidden" multiple>
+                </div>
+                <div class="form-group" id="docTypeGroup">
+                    <label>סוג המסמך:</label>
+                    <select id="docTypeSelect" onchange="onDocTypeChange()">
+                        <option value="invoice">🧾 חשבונית</option>
+                        <option value="income">💰 חשבונית הכנסה</option>
+                        <option value="delivery">🚚 תעודת משלוח</option>
+                    </select>
+                    <div id="docTypeHint" style="font-size:0.75em; color:#16a085; margin-top:2px;"></div>
+                </div>
+                <div class="form-group">
+                    <label id="supplierLabel">ספק:</label>
+                    <select id="invoiceSupplierSelect"></select>
+                    <div id="supplierMatchHint" style="font-size:0.78em; margin-top:2px;"></div>
+                </div>
+                <div class="form-group">
+                    <label id="numberLabel">מספר חשבונית / אסמכתא:</label>
+                    <input type="text" id="invoiceNumberInput" placeholder="מספר חשבונית (אם קיים)" oninput="refreshNumberHint()">
+                    <div id="numberHint" style="font-size:0.78em; margin-top:2px;"></div>
+                </div>
+                <div class="form-group">
+                    <label>תאריך החשבונית:</label>
+                    <input type="date" id="invoiceDateInput" onchange="refreshDateHint()">
+                    <div id="dateHint" style="font-size:0.78em; margin-top:2px;"></div>
+                </div>
+                <div class="form-group">
+                    <label id="amountLabel">סכום לתשלום (₪):</label>
+                    <input type="number" id="invoiceAmountInput" step="0.01" placeholder="0.00">
+                </div>
+                <div class="form-group" id="paymentGroup">
+                    <label>אמצעי תשלום:</label>
+                    <input type="text" id="invoicePaymentMethodInput" list="paymentMethodsList" placeholder="בחר או הקלד אמצעי תשלום...">
+                    <datalist id="paymentMethodsList">
+                        <option value="כרטיס אשראי">כרטיס אשראי</option>
+                        <option value="העברה בנקאית">העברה בנקאית</option>
+                        <option value="הוראת קבע">הוראת קבע</option>
+                        <option value="עמלה">עמלה</option>
+                        <option value="צ'ק">צ'ק</option>
+                        <option value="זיכוי">זיכוי</option>
+                        <option value="הכנסה">הכנסה - יועבר לרשימת ההכנסות</option>
+                        <option value="חיצוני">חיצוני - שולם מחוץ לעסק, לא נספר בסכומי הדוח</option>
+                    </datalist>
+                </div>
+                <div class="form-group">
+                    <label>פרטים שזוהו בחשבונית:</label>
+                    <div id="invoiceItemsDisplay" class="items-list-box">טרם זוהו פרטים</div>
+                </div>
+                <div class="form-group hidden" id="handwrittenBox" style="background:#fffbea; border:1px solid #f1c40f; border-radius:8px; padding:8px;">
+                    <label style="color:#7d6608;">✍️ נמצא כתב יד - סמן מה רלוונטי:</label>
+                    <div id="handwrittenList" style="font-size:0.9em;"></div>
+                </div>
+                <div id="handwritingStatus" style="font-size:0.78em; margin:-6px 0 8px 0;"></div>
+                <div class="form-group">
+                    <label>הערות:</label>
+                    <input type="text" id="invoiceNotesInput" placeholder="הכללת הערה חודשית/פנימית לחשבונית...">
+                </div>
+                <div class="form-group">
+                    <label for="invoicePrintStatus">הדפסה פיזית:</label>
+                    <select id="invoicePrintStatus"><option value="needed">צריך הדפסה</option><option value="printed">כבר מודפס / יש עותק פיזי</option><option value="not_needed">לא נדרשת הדפסה כרגע</option></select>
+                    <small>פתיחת חלון ההדפסה אינה מסמנת שהמסמך הודפס. את הסימון מעדכנים לאחר ההדפסה.</small>
+                </div>
+                <div class="modal-actions">
+                    <button id="saveInvoiceBtn" onclick="saveInvoiceEntry()" style="background-color:#27ae60;">שמור חשבונית</button>
+                    <button onclick="cancelInvoiceEntry()" style="background-color:#7f8c8d;">ביטול</button>
+                </div>
+                <div class="modal-actions" style="margin-top:8px;">
+                    <button id="saveAndPrintBtn" onclick="saveAndPrintInvoice()" style="background-color:#16a085;">💾🖨️ שמור והדפס</button>
+                    <button id="printOnlyBtn" onclick="printScannedDocument()" style="background-color:#8e44ad;">🖨️ הדפס בלבד</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- התראות שינוי מחיר -->
+        <div class="card hidden" id="priceAlertsCard" style="border:2px solid #e67e22;">
+            <h3 style="margin-top:0; color:#d35400;">📈 שינויי מחיר החודש</h3>
+            <p style="font-size:0.8em; color:#555; margin:-4px 0 6px 0;">מחיר ליחידה שעלה לעומת הרכישה הקודמת:</p>
+            <div class="table-wrapper" id="priceAlertsList"></div>
+        </div>
+
+        <!-- תעודות משלוח והתאמה לחשבונית מרכזת -->
+        <div class="card" id="deliveryCard" style="border:2px solid #16a085;">
+            <h3 style="margin-top:0; color:#16a085;">🚚 תעודות משלוח והתאמה לחשבונית מרכזת</h3>
+            <p style="font-size:0.8em; color:#555; margin:-4px 0 8px 0;">בסוף החודש, בחר ספק לבדיקת התאמה לחשבונית המרכזת.</p>
+
+            <h4 style="margin:14px 0 4px 0;">תעודות שנקלטו לחודש הנוכחי:</h4>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ספק</th>
+                            <th>מס' תעודה</th>
+                            <th>סכום</th>
+                            <th>פרטים</th>
+                            <th>פעולות</th>
+                        </tr>
+                    </thead>
+                    <tbody id="deliveryNotesTableBody">
+                        <tr><td colspan="5" style="color:#888;">טוען נתונים...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4 style="margin:14px 0 4px 0;">בדיקת התאמה לחשבונית מרכזת:</h4>
+            <div class="form-group">
+                <label>ספק:</label>
+                <select id="deliveryMatchSupplier" onchange="renderDeliveryMatch()">
+                    <option value="">-- בחר ספק --</option>
+                </select>
+            </div>
+            <div class="form-group hidden" id="consolidatedInvoiceWrap">
+                <label>החשבונית המרכזת:</label>
+                <select id="consolidatedInvoiceSelect" onchange="renderDeliveryMatch()"></select>
+            </div>
+            <div id="deliveryMatchResult"></div>
+        </div>
+
+        <!-- הצגת סיכום חודשי לפי ספק -->
+        <div class="card">
+            <h3 style="margin-top:0;">📊 סיכום חודשי ופרטים לפי ספק</h3>
+            <div class="form-group">
+                <label>פירוט מוצרים לפי ספק:</label>
+                <select id="supplierSummarySelect" onchange="renderSupplierSummary()">
+                    <option value="">-- בחר ספק --</option>
+                </select>
+            </div>
+            <div id="supplierSummaryDisplay" class="supplier-summary-card hidden"></div>
+        </div>
+
+        <!-- חיפוש וסיכום פריטים -->
+        <div class="card">
+            <h3 style="margin-top:0;">🔍 חיפוש פריט חודשי</h3>
+            <div style="display:flex; gap:6px;">
+                <input type="text" id="itemSearchQuery" placeholder="הכנס שם מוצר/פריט (לדוגמה: חלב, דגים, סלמון)...">
+                <button onclick="searchAndSummarizeItems()" style="width:auto; background-color:#27ae60; white-space:nowrap;">חפש פריט</button>
+            </div>
+            <div id="itemSearchResults" class="hidden search-results-box"></div>
+        </div>
+
+        <!-- גרפים -->
+        <div class="card">
+            <h3 style="margin-top:0;">📊 גרפים ומגמות</h3>
+            <button onclick="renderSpendCharts()" style="background-color:#8e44ad;">הצג הוצאות (6 חודשים אחרונים)</button>
+            <div id="spendChartsBox" style="margin-top:8px;"></div>
+            <hr style="border:0; border-top:1px solid #ddd; margin:10px 0;">
+            <div style="display:flex; gap:6px;">
+                <input type="text" id="trendItemQuery" placeholder="מגמת מחיר לפריט (לדוגמה: סלמון)...">
+                <button onclick="renderPriceTrend()" style="width:auto; background-color:#8e44ad; white-space:nowrap;">הצג מגמה</button>
+            </div>
+            <div id="priceTrendBox" style="margin-top:6px;"></div>
+        </div>
+
+        <!-- גיבוי -->
+        <div class="card">
+            <h3 style="margin-top:0;">🔑 שינוי סיסמת כניסה</h3>
+            <button onclick="changeAdminPassword()" style="background-color:#34495e;">שנה סיסמה</button>
+            <div style="font-size:0.72em; color:#888; margin-top:6px;">נדרשת הסיסמה הנוכחית. כניסה בטביעת אצבע ממשיכה לעבוד.</div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0;">💾 גיבוי נתונים</h3>
+            <button onclick="cloudBackupNow()" style="background-color:#16a085;">☁️ גבה עכשיו לענן</button>
+            <div id="backupInfo" style="font-size:0.8em; color:#555; margin:4px 0 2px;"></div>
+            <div style="font-size:0.72em; color:#888; margin:0 0 8px;">הגיבוי כולל מסמכים, ספקים ומחירון - לא את תמונות המסמכים המקוריות.</div>
+            <div id="backupList"></div>
+            <div style="display:flex; gap:6px;">
+                <button onclick="exportBackup()" style="background-color:#7f8c8d; width:auto; flex:1;">📤 ייצוא לקובץ</button>
+                <button onclick="document.getElementById('backupFileInput').click()" style="background-color:#7f8c8d; width:auto; flex:1;">📥 שחזור מקובץ</button>
+            </div>
+            <input type="file" id="backupFileInput" accept=".json,application/json" class="hidden" onchange="restoreFromFile(this)">
+        </div>
+
+        <!-- טבלת חשבוניות גולמיות -->
+        <div class="card">
+            <h3 style="margin-top:0;">חשבוניות החודש</h3>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ספק</th>
+                            <th>מס' חשבונית</th>
+                            <th>סכום</th>
+                            <th>אמצעי תשלום</th>
+                            <th>פרטים</th>
+                            <th>הערות</th>
+                            <th>פעולות</th>
+                        </tr>
+                    </thead>
+                    <tbody id="invoicesTableBody">
+                        <tr><td colspan="7" style="color:#888;">טוען נתונים...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- חשבוניות הכנסה - נפרדות מדוח הספקים -->
+        <div class="card" id="incomeCard" style="border:2px solid #8e44ad;">
+            <h3 style="margin-top:0; color:#8e44ad;">💰 חשבוניות הכנסה</h3>
+            <p style="font-size:0.8em; color:#555; margin:-4px 0 8px 0;">נשמרות כאן בנפרד, לשמירה ולהדפסה. לא נכללות בדוח הספקים, בייצוא שלו ובגרפי ההוצאות. כדי לסווג חשבונית כהכנסה: בחרו "חשבונית הכנסה" בסוג המסמך, או כתבו "הכנסה" באמצעי התשלום.</p>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>לקוח</th>
+                            <th>מס' חשבונית</th>
+                            <th>סכום</th>
+                            <th>אמצעי תשלום</th>
+                            <th>הערות</th>
+                            <th>פעולות</th>
+                        </tr>
+                    </thead>
+                    <tbody id="incomeTableBody">
+                        <tr><td colspan="6" style="color:#888;">אין חשבוניות הכנסה לחודש זה.</td></tr>
+                    </tbody>
+                    <tfoot>
+                        <tr style="background:#f8f9fa; font-weight:bold;">
+                            <td>סה"כ הכנסות החודש</td>
+                            <td id="incomeTotalCell" style="color:#8e44ad;">0.00 ₪</td>
+                            <td colspan="4"></td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+            <div class="action-btns-group" style="margin-top:10px;">
+                <button class="pdf-btn" id="incomePdfBtn" onclick="exportIncomeToPDF()" style="background-color:#8e44ad;">🖨️ הדפס חשבוניות הכנסה לחודש זה</button>
+            </div>
+        </div>
+
+        <!-- דוח ספקים חודשי אדיטבילי לייצוא -->
+        <div class="card" style="border: 2px solid #34495e;">
+            <h3 style="margin-top:0; color:#34495e;">📋 דוח ספקים חודשי מסוכם (ניתן לעריכה ישירה)</h3>
+            <p style="font-size:0.8em; color:#555; margin:-4px 0 8px 0;">חשבונית עם "חיצוני" באמצעי התשלום נשמרת ומודפסת כרגיל, אבל לא נספרת בסכומי הדוח כי לא שולמה מהעסק.</p>
+            <button type="button" id="reorderToggleBtn" class="reorder-toggle" onclick="toggleReportReorder()">↕️ שנה סדר</button>
+            <div class="table-wrapper">
+                <table id="editableReportTable">
+                    <thead>
+                        <tr style="background:#34495e; color:white;">
+                            <th>שם הספק</th>
+                            <th><span class="th-full">סכום לתשלום / זיכוי (₪)</span><span class="th-short">סכום (₪)</span></th>
+                            <th>אמצעי תשלום</th>
+                            <th>הערות</th>
+                        </tr>
+                    </thead>
+                    <tbody id="editableReportTableBody">
+                        <tr><td colspan="4" style="color:#888;">אין נתונים</td></tr>
+                    </tbody>
+                    <tfoot>
+                        <tr style="background:#f8f9fa; font-weight:bold;">
+                            <td id="editableReportTotalLabel">סה"כ לתשלום נטו</td>
+                            <td id="editableReportTotalCell" style="color:#1877f2; font-size:1.05em;">0.00 ₪</td>
+                            <td colspan="2"></td>
+                        </tr>
+                        <tr id="editableReportCommRow" style="background:#f8f9fa; font-weight:bold; display:none;">
+                            <td>סה"כ כולל עמלה</td>
+                            <td id="editableReportTotalWithCommCell" style="color:#1877f2; font-size:1.05em;">0.00 ₪</td>
+                            <td colspan="2"></td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+            
+            <div id="reportIncomeBlock" style="margin-top:14px; border:1.5px solid #8e44ad; border-radius:10px; padding:10px;">
+                <div style="font-weight:bold; color:#8e44ad; margin-bottom:6px;">💰 חשבוניות הכנסה החודש <span style="font-weight:normal; font-size:0.8em; color:#555;">(סיכום נפרד - לא נכללות בסכומי הספקים)</span></div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>לקוח</th>
+                                <th>מס' חשבונית</th>
+                                <th>תאריך</th>
+                                <th>סכום</th>
+                            </tr>
+                        </thead>
+                        <tbody id="reportIncomeTableBody">
+                            <tr><td colspan="4" style="color:#888;">אין חשבוניות הכנסה החודש.</td></tr>
+                        </tbody>
+                        <tfoot>
+                            <tr style="background:#f8f9fa; font-weight:bold;">
+                                <td>סה"כ הכנסות החודש</td>
+                                <td id="reportIncomeTotalCell" style="color:#8e44ad;">0.00 ₪</td>
+                                <td colspan="2"></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            </div>
+
+            <div class="action-btns-group" style="margin-top:14px;">
+                <button class="pdf-btn" onclick="exportInvoicesToPDF()">📄 הורד דוח A4 לחודש (PDF)</button>
+                <button class="excel-btn" onclick="exportInvoicesToExcel()">📊 ייצוא לאקסל (XLSX)</button>
+                <button class="pdf-btn" id="emailInvPdfBtn" onclick="exportEmailInvoicesToPDF()" style="background-color:#2c3e50;">🖨️ הדפס חשבוניות הוצאות שממתינות להדפסה</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0;">ניהול רשימת ספקים:</h3>
+            <div style="display:flex; gap:6px;">
+                <input type="text" id="newSupplierNameInput" placeholder="שם ספק חדש...">
+                <button onclick="addSupplierToList()" style="width:auto; background-color:#3498db; white-space:nowrap;">הוסף</button>
+            </div>
+            <input type="text" id="supplierFilterInput" placeholder="🔍 חפש ספק..." oninput="renderSupplierManageList()" style="margin-top:8px;">
+            <div id="supplierListManage" style="margin-top:6px;"></div>
+        </div>
+
+        <div id="bioSettings" class="hidden" style="text-align:center; margin:8px 0;">
+            <button id="bioToggleBtn" onclick="toggleBiometric()" style="width:auto; background-color:#7f8c8d; margin-top:0;">🔐 הפעל כניסה בטביעת אצבע</button>
+        </div>
+    </div>
+
+    <!-- אלמנט נסתר להורדת PDF A4 -->
+    <div id="invoicesPdfContainer" style="display:block; position:fixed; left:-9999px; top:0; width:210mm; background:white; padding:16px; box-sizing:border-box; direction:rtl;">
+        <h2 style="text-align:center; font-size:24px; margin-bottom:4px;">סיכום חשבוניות חודשי</h2>
+        <div id="invoicesPdfMonthTitle" style="text-align:center; font-size:16px; color:#555; margin-bottom:16px;"></div>
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+                <tr style="background:#f5f6f7;">
+                    <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">שם הספק</th>
+                    <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">סכום לתשלום / זיכוי</th>
+                    <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">אמצעי תשלום</th>
+                    <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">הערות</th>
+                </tr>
+            </thead>
+            <tbody id="invoicesPdfTableBody"></tbody>
+            <tfoot>
+                <tr>
+                    <td id="invoicesPdfTotalLabel" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;">סה"כ לתשלום נטו</td>
+                    <td id="invoicesPdfTotalCell" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;"></td>
+                    <td style="border:1px solid #999;"></td>
+                    <td style="border:1px solid #999;"></td>
+                </tr>
+                <tr id="invoicesPdfCommRow" style="display:none;">
+                    <td style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;">סה"כ כולל עמלה</td>
+                    <td id="invoicesPdfTotalCommCell" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;"></td>
+                    <td style="border:1px solid #999;"></td>
+                    <td style="border:1px solid #999;"></td>
+                </tr>
+            </tfoot>
+        </table>
+        <div id="invoicesPdfIncomeSection" style="margin-top:26px; display:none;">
+            <h3 style="font-size:19px; margin:0 0 2px 0;">חשבוניות הכנסה</h3>
+            <div style="font-size:12px; color:#555; margin-bottom:8px;">סיכום נפרד - לא נכלל בסכום הספקים</div>
+            <table style="width:100%; border-collapse:collapse;">
+                <thead>
+                    <tr style="background:#f5f6f7;">
+                        <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">לקוח</th>
+                        <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">מס' חשבונית</th>
+                        <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">תאריך</th>
+                        <th style="border:1px solid #999; padding:8px; font-size:15px; text-align:right;">סכום</th>
+                    </tr>
+                </thead>
+                <tbody id="invoicesPdfIncomeTableBody"></tbody>
+                <tfoot>
+                    <tr>
+                        <td style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;">סה"כ הכנסות החודש</td>
+                        <td style="border:1px solid #999;"></td>
+                        <td style="border:1px solid #999;"></td>
+                        <td id="invoicesPdfIncomeTotalCell" style="border:1px solid #999; padding:8px; font-weight:bold; font-size:16px;"></td>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+    </div>
+
+    <script src="ui.js"></script>
+        <script type="importmap">
+    {"imports": {
+      "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js": "./test/firebase-stub.js",
+      "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js": "./test/firebase-stub.js",
+      "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js": "./test/firebase-stub.js",
+      "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js": "./test/firebase-stub.js"
+    }}
+    </script>
+    <script type="module" src="app.js"></script>
+    <script type="module" src="test/driver.js"></script>
+    <script src="register-sw.js"></script>
+    <script src="image-viewer.js"></script>
+    <script src="fold-cards.js"></script>
+</body>
+</html>
+

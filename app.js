@@ -1641,6 +1641,7 @@
 
             try {
                 await scanPreviewPromise;   // ממתין שהתמונה תתאים לעמודים שסומנו
+                applySplitSaveIdentity(noteNumber, supplier, 'delivery');
                 const noteId = docIdForSave();
                 const data = { id: noteId, docType: 'delivery_note', supplier, invoiceNumber: noteNumber, invoiceDate: noteDate, amount, notes, monthKey, items, handwrittenNotes: keptHandwrittenNotes() };
                 if (pendingInboxItem) data.source = pendingInboxItem.source || 'email';
@@ -2559,17 +2560,8 @@
             if (kA && kB && kA !== kB) return false;
             return true;
         }
-        // עמוד ללא מספר עם ספק או סוג שזוהו ושונים מהמסמך הנוכחי - סימן שאולי זה מסמך חדש
-        function unnumberedLooksNewDoc(r, curGroup) {
-            if (!r || !curGroup || !curGroup.ref) return false;
-            const s = splitPageSupplier(r), cs = splitPageSupplier(curGroup.ref);
-            if (s && cs && s !== cs) return true;
-            const k = splitPageKind(r), ck = splitPageKind(curGroup.ref);
-            if (k && ck && k !== ck) return true;
-            return false;
-        }
-        // קיבוץ ראשוני. עמוד בלי מספר קריא שיש לפניו מסמך נרשם ב-ambiguous: שיוכו לא מוחלט -
-        // המשתמש בוחר עבורו "המשך של המסמך הקודם" או "מסמך חדש" לפני שממשיכים.
+        // קיבוץ ראשוני. כל עמוד ללא מספר קריא (כולל עמוד ראשון) נרשם ב-ambiguous: שיוכו לא מוכרע -
+        // המשתמש מכריע עבור כל עמוד כזה "המשך של הקודם" / "מסמך חדש" / "חלק מהבא" לפני שממשיכים.
         function groupScanPages(results) {
             const groups = [];
             const groupOf = [];
@@ -2579,6 +2571,7 @@
                 if (!groups.length) {
                     groups.push({ pageIdxs: [i], ref: num ? r : null, hasUnnumbered: !num });
                     groupOf[i] = groups[0];
+                    if (!num) ambiguous.push(i);
                     return;
                 }
                 const cur = groups[groups.length - 1];
@@ -2590,30 +2583,65 @@
             });
             return { groups, groupOf, ambiguous };
         }
-        // קיבוץ סופי לפי החלטות המשתמש: decisions[pageIdx] = 'continue' | 'new' לכל עמוד ללא מספר
+        // קיבוץ סופי לפי החלטות המשתמש לכל עמוד ללא מספר: decisions[pageIdx] = 'continue' | 'new' | 'next'.
+        // עמוד ממוספר שבא אחרי "מסמך חדש" שהמשתמש הכריז הוא מסמך בפני עצמו - אין מיזוג שקט לזהות אחרת.
         function regroupWithDecisions(results, decisions) {
             const groups = [];
+            let pendingNext = null;   // עמודים ללא מספר שהוכרזו "חלק מהמסמך הבא" ומחכים לזהות העוקבת
             results.forEach((r, i) => {
                 const num = splitPageNumber(r);
-                if (!groups.length) { groups.push({ pageIdxs: [i], ref: num ? r : null, hasUnnumbered: !num }); return; }
-                const cur = groups[groups.length - 1];
                 if (!num) {
-                    if (decisions && decisions[String(i)] === 'new') { groups.push({ pageIdxs: [i], ref: null, hasUnnumbered: true }); return; }
-                    cur.pageIdxs.push(i); cur.hasUnnumbered = true; return;
+                    const d = decisions && decisions[String(i)];
+                    if (d === 'new') { groups.push({ pageIdxs: [i], ref: null, hasUnnumbered: true }); pendingNext = null; return; }
+                    if (d === 'next' || (!d && !groups.length && !pendingNext)) {
+                        if (!pendingNext) pendingNext = { pageIdxs: [], ref: null, hasUnnumbered: true };
+                        pendingNext.pageIdxs.push(i); return;
+                    }
+                    const cur = groups[groups.length - 1];
+                    if (cur) { cur.pageIdxs.push(i); cur.hasUnnumbered = true; return; }
+                    if (!pendingNext) pendingNext = { pageIdxs: [], ref: null, hasUnnumbered: true };
+                    pendingNext.pageIdxs.push(i);
+                    return;
                 }
-                // מסמך ללא מספר בראש הקובץ בלבד "מאמץ" את הזהות של העמוד הממוספר שאחריו;
-                // אחרי החלטת "מסמך חדש" של המשתמש, עמוד ממוספר הוא מסמך בפני עצמו
-                if (!cur.ref && cur.pageIdxs[0] === 0) { cur.ref = r; cur.pageIdxs.push(i); return; }
-                if (sameSplitDoc(cur.ref, r) === true) { cur.pageIdxs.push(i); return; }
+                if (pendingNext) {
+                    const cur = groups[groups.length - 1];
+                    if (cur && cur.ref && sameSplitDoc(cur.ref, r) === true) {
+                        cur.pageIdxs.push(...pendingNext.pageIdxs, i);   // אותה זהות - הכל מסמך אחד
+                    } else {
+                        pendingNext.ref = r; pendingNext.pageIdxs.push(i);
+                        groups.push(pendingNext);
+                    }
+                    pendingNext = null; return;
+                }
+                const cur = groups[groups.length - 1];
+                if (cur && cur.ref && sameSplitDoc(cur.ref, r) === true) { cur.pageIdxs.push(i); return; }
                 groups.push({ pageIdxs: [i], ref: r, hasUnnumbered: false });
             });
+            if (pendingNext) groups.push(pendingNext);   // "חלק מהבא" בלי מסמך ממוספר עוקב - נשאר מסמך נפרד ללא מספר
             return groups;
         }
-        // מזהה יציב למסמך בפיצול: נגזר מהתוכן (מספר המסמך, או העמוד הראשון כשאין מספר) ולא מסדר העיבוד -
-        // כך שינוי בחירות או ניסיון חוזר לא דורסים מסמך אחר
-        function splitDocKey(g) {
-            const n = g && g.ref ? splitPageNumber(g.ref) : '';
-            return n ? 'n' + n : 'p' + ((g && g.pageIdxs.length ? g.pageIdxs[0] : 0) + 1);
+        function normKeyPart(s) { return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ').replace(/\//g, ''); }
+        // מזהה יציב למסמך בפיצול: נגזר מזהות המסמך המלאה (מספר + ספק + סוג) ולא מסדר העיבוד -
+        // אותו מספר אצל ספק אחר או בסוג מסמך אחר הוא מסמך אחר ולא דורס. בלי מספר - העמוד הראשון של המסמך.
+        function splitDocKey(g, results) {
+            const merged = (g && results) ? mergePageResults(g.pageIdxs.map(i => results[i])) : ((g && g.ref) || {});
+            const n = splitPageNumber(merged);
+            const base = n ? 'n' + n : 'p' + (((g && g.pageIdxs[0]) || 0) + 1);
+            return base + '__s' + (normKeyPart(splitPageSupplier(merged)) || '-') + '__' + (splitPageKind(merged) || '-');
+        }
+        // בשמירה בתוך פיצול: המזהה נגזר מהזהות הסופית בטופס (אחרי עריכת המשתמש), כך שניסיון חוזר עם
+        // אותן בחירות דורס את אותו מסמך. אם אותה זהות כבר נשמרה כמסמך אחר בסדרה - לא דורסים אותו.
+        function applySplitSaveIdentity(number, supplier, kind) {
+            if (!splitScanState || !pendingInboxItem || !pendingInboxItem.originalPath) return;
+            const g = splitScanState.groups[splitScanState.idx];
+            const n = String(number || '').replace(/\D/g, '');
+            const base = n ? 'n' + n : 'p' + (((g && g.pageIdxs[0]) || 0) + 1);
+            let cand = pendingInboxItem.id + '__' + base + '__s' + (normKeyPart(supplier) || '-') + '__' + (kind || '-');
+            splitScanState.claimedIds = splitScanState.claimedIds || {};
+            const owner = splitScanState.claimedIds[cand];
+            if (owner !== undefined && owner !== splitScanState.idx) cand = cand + '__x' + Date.now().toString(36);
+            splitScanState.claimedIds[cand] = splitScanState.idx;
+            pendingNewDocId = cand;
         }
         function splitGroupParts(g, results) {
             const merged = mergePageResults(g.pageIdxs.map(i => results[i]));
@@ -2625,7 +2653,7 @@
             if (typeof merged.amount === 'number') amount = (merged.isCredit && merged.amount > 0) ? -Math.abs(merged.amount) : merged.amount;
             return { kind, num, sup, amount, pages: g.pageIdxs.map(i => i + 1), noNumber: !num };
         }
-        // סיכום פיצול אינטראקטיבי: כל עמוד ללא מספר מחייב בחירה מפורשת ("המשך" / "מסמך חדש") -
+        // סיכום פיצול אינטראקטיבי: כל עמוד ללא מספר מחייב בחירה מפורשת ("המשך" / "מסמך חדש" / "חלק מהבא") -
         // אי אפשר להמשיך בלי להכריע כל עמוד כזה. ביטול = מילוי ידני, בלי מיזוג שקט.
         function showSplitSummary(results, splitInfo) {
             return new Promise((resolve) => {
@@ -2648,10 +2676,15 @@
                     }).join('');
                     const decisionRows = splitInfo.ambiguous.map(i => {
                         const chosen = decisions[String(i)] || '';
+                        const hasPrev = i > 0;
+                        const hasNext = results.slice(i + 1).some(r => splitPageNumber(r));
+                        const opt = (val, label) => '<label style="display:block; font-size:0.85em; margin-top:3px;"><input type="radio" name="splitDec' + i + '" value="' + val + '"' + (chosen === val ? ' checked' : '') + '> ' + label + '</label>';
                         return '<div style="border:1px solid #e67e22; border-radius:8px; padding:6px 8px; margin-bottom:6px; background:#fff8f0;">'
                             + '<div style="font-size:0.85em; font-weight:600;">עמוד ' + (i + 1) + ' - לא נקרא מספר חשבונית. מה זה?</div>'
-                            + '<label style="display:block; font-size:0.85em; margin-top:3px;"><input type="radio" name="splitDec' + i + '" value="continue"' + (chosen === 'continue' ? ' checked' : '') + '> המשך של המסמך הקודם</label>'
-                            + '<label style="display:block; font-size:0.85em;"><input type="radio" name="splitDec' + i + '" value="new"' + (chosen === 'new' ? ' checked' : '') + '> מסמך חדש</label></div>';
+                            + (hasPrev ? opt('continue', 'המשך של המסמך הקודם') : '')
+                            + opt('new', 'מסמך חדש')
+                            + (hasNext ? opt('next', 'חלק מהמסמך הבא') : '')
+                            + '</div>';
                     }).join('');
                     overlay.innerHTML = '<div style="background:#fff; width:100%; max-width:520px; max-height:85vh; overflow-y:auto; border-radius:12px; padding:14px; direction:rtl;">'
                         + '<div style="font-weight:700; margin-bottom:6px;" id="splitSummaryTitle">זוהו ' + groups.length + ' מסמכים נפרדים בקובץ</div>'
@@ -2789,10 +2822,9 @@
                 await Promise.all(Array.from({ length: Math.min(3, pages.length) }, worker));
 
                 // פיצול: מספרי מסמך שונים בין העמודים = מסמכים נפרדים, כל אחד מאושר ונשמר בנפרד.
-                // עמוד ללא מספר עם סימני מסמך חדש גם הוא פותח את מסך הפיצול - שם המשתמש מכריע כל שיוך.
+                // כל עמוד שהזהות שלו לא נקראה (כל עמוד ללא מספר) פותח את מסך ההכרעה - אין שיוך שקט בשום צורה.
                 const splitInfo = (pages.length > 1) ? groupScanPages(results) : null;
-                const splitNeeded = splitInfo && (splitInfo.groups.length > 1
-                    || splitInfo.ambiguous.some(i => unnumberedLooksNewDoc(results[i], splitInfo.groupOf[i])));
+                const splitNeeded = splitInfo && (splitInfo.groups.length > 1 || splitInfo.ambiguous.length > 0);
                 if (splitNeeded) {
                     try { await hdrPromise; } catch (e) {}   // במצב פיצול לא משתמשים בקריאת הכותרת הנפרדת
                     const decidedGroups = await showSplitSummary(results, splitInfo);
@@ -3162,7 +3194,7 @@
         function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {
             // מזהה יציב לכל מסמך בנפרד (גם בפיצול) - ניסיון שמירה חוזר דורס את אותו מסמך ולא יוצר כפילות
             pendingNewDocId = pendingInboxItem && pendingInboxItem.originalPath
-                ? (splitScanState ? pendingInboxItem.id + '__' + splitDocKey(splitScanState.groups[splitScanState.idx]) : pendingInboxItem.id)
+                ? (splitScanState ? pendingInboxItem.id + '__' + splitDocKey(splitScanState.groups[splitScanState.idx], splitScanState.results) : pendingInboxItem.id)
                 : null;
             const confirmForm = document.getElementById('invoiceConfirmForm');
             const imgWrap = document.getElementById('invoicePreviewImgWrap');
@@ -3446,6 +3478,7 @@
 
             try {
                 await scanPreviewPromise;   // ממתין שהתמונה תתאים לעמודים שסומנו
+                applySplitSaveIdentity(invoiceNumber, supplier, isIncome ? 'income' : (amount < 0 ? 'credit' : 'invoice'));
                 const invoiceId = docIdForSave();
                 const invData = {
                     id: invoiceId, docType: isIncome ? 'income' : 'invoice', supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,

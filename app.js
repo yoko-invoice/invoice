@@ -2559,66 +2559,119 @@
             if (kA && kB && kA !== kB) return false;
             return true;
         }
-        // עמוד בלי מספר קריא מצורף למסמך שקדם לו, אבל השיוך מסומן ומוצג למשתמש בסיכום
-        // הפיצול לאישור - לא מוחלט בשקט. מסמך חדש נפתח רק על מספר שונה (או ספק/סוג שונה).
+        // עמוד ללא מספר עם ספק או סוג שזוהו ושונים מהמסמך הנוכחי - סימן שאולי זה מסמך חדש
+        function unnumberedLooksNewDoc(r, curGroup) {
+            if (!r || !curGroup || !curGroup.ref) return false;
+            const s = splitPageSupplier(r), cs = splitPageSupplier(curGroup.ref);
+            if (s && cs && s !== cs) return true;
+            const k = splitPageKind(r), ck = splitPageKind(curGroup.ref);
+            if (k && ck && k !== ck) return true;
+            return false;
+        }
+        // קיבוץ ראשוני. עמוד בלי מספר קריא שיש לפניו מסמך נרשם ב-ambiguous: שיוכו לא מוחלט -
+        // המשתמש בוחר עבורו "המשך של המסמך הקודם" או "מסמך חדש" לפני שממשיכים.
         function groupScanPages(results) {
             const groups = [];
+            const groupOf = [];
+            const ambiguous = [];
             results.forEach((r, i) => {
                 const num = splitPageNumber(r);
                 if (!groups.length) {
                     groups.push({ pageIdxs: [i], ref: num ? r : null, hasUnnumbered: !num });
+                    groupOf[i] = groups[0];
                     return;
                 }
                 const cur = groups[groups.length - 1];
-                if (!num) { cur.pageIdxs.push(i); cur.hasUnnumbered = true; return; }
-                if (!cur.ref) { cur.ref = r; cur.pageIdxs.push(i); return; }
+                if (!num) { cur.pageIdxs.push(i); cur.hasUnnumbered = true; groupOf[i] = cur; ambiguous.push(i); return; }
+                if (!cur.ref) { cur.ref = r; cur.pageIdxs.push(i); groupOf[i] = cur; return; }
+                if (sameSplitDoc(cur.ref, r) === true) { cur.pageIdxs.push(i); groupOf[i] = cur; return; }
+                groups.push({ pageIdxs: [i], ref: r, hasUnnumbered: false });
+                groupOf[i] = groups[groups.length - 1];
+            });
+            return { groups, groupOf, ambiguous };
+        }
+        // קיבוץ סופי לפי החלטות המשתמש: decisions[pageIdx] = 'continue' | 'new' לכל עמוד ללא מספר
+        function regroupWithDecisions(results, decisions) {
+            const groups = [];
+            results.forEach((r, i) => {
+                const num = splitPageNumber(r);
+                if (!groups.length) { groups.push({ pageIdxs: [i], ref: num ? r : null, hasUnnumbered: !num }); return; }
+                const cur = groups[groups.length - 1];
+                if (!num) {
+                    if (decisions && decisions[String(i)] === 'new') { groups.push({ pageIdxs: [i], ref: null, hasUnnumbered: true }); return; }
+                    cur.pageIdxs.push(i); cur.hasUnnumbered = true; return;
+                }
+                // מסמך ללא מספר בראש הקובץ בלבד "מאמץ" את הזהות של העמוד הממוספר שאחריו;
+                // אחרי החלטת "מסמך חדש" של המשתמש, עמוד ממוספר הוא מסמך בפני עצמו
+                if (!cur.ref && cur.pageIdxs[0] === 0) { cur.ref = r; cur.pageIdxs.push(i); return; }
                 if (sameSplitDoc(cur.ref, r) === true) { cur.pageIdxs.push(i); return; }
                 groups.push({ pageIdxs: [i], ref: r, hasUnnumbered: false });
             });
             return groups;
         }
-
-        function splitGroupLabel(g, results) {
+        // מזהה יציב למסמך בפיצול: נגזר מהתוכן (מספר המסמך, או העמוד הראשון כשאין מספר) ולא מסדר העיבוד -
+        // כך שינוי בחירות או ניסיון חוזר לא דורסים מסמך אחר
+        function splitDocKey(g) {
+            const n = g && g.ref ? splitPageNumber(g.ref) : '';
+            return n ? 'n' + n : 'p' + ((g && g.pageIdxs.length ? g.pageIdxs[0] : 0) + 1);
+        }
+        function splitGroupParts(g, results) {
             const merged = mergePageResults(g.pageIdxs.map(i => results[i]));
             const k = splitPageKind(merged) || splitPageKind(g.ref);
             const kind = k === 'credit' ? 'חשבונית זיכוי' : (k === 'delivery' ? 'תעודת משלוח' : 'חשבונית');
             const num = String(merged.invoiceNumber || '').trim();
             const sup = splitPageSupplier(merged);
-            let amt = '';
-            if (typeof merged.amount === 'number') {
-                const a = (merged.isCredit && merged.amount > 0) ? -Math.abs(merged.amount) : merged.amount;
-                amt = ', ' + a + ' ₪';
-            }
-            return kind + (num ? ' מספר ' + num : '') + (sup ? ', ' + sup : '') + amt;
+            let amount = null;
+            if (typeof merged.amount === 'number') amount = (merged.isCredit && merged.amount > 0) ? -Math.abs(merged.amount) : merged.amount;
+            return { kind, num, sup, amount, pages: g.pageIdxs.map(i => i + 1), noNumber: !num };
         }
-
-        // סיכום הפיצול לאישור לפני פתיחת מסכי האישור הנפרדים. ביטול = מילוי ידני, בלי מיזוג שקט.
-        function showSplitSummary(groups, results) {
+        // סיכום פיצול אינטראקטיבי: כל עמוד ללא מספר מחייב בחירה מפורשת ("המשך" / "מסמך חדש") -
+        // אי אפשר להמשיך בלי להכריע כל עמוד כזה. ביטול = מילוי ידני, בלי מיזוג שקט.
+        function showSplitSummary(results, splitInfo) {
             return new Promise((resolve) => {
+                const decisions = {};
                 const overlay = document.createElement('div');
                 overlay.id = 'splitSummaryOverlay';
                 overlay.style.cssText = 'position:fixed; inset:0; z-index:1100; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:12px;';
-                const rows = groups.map((g, gi) => {
-                    const pagesTxt = g.pageIdxs.map(i => i + 1).join(', ');
-                    const warn = g.hasUnnumbered
-                        ? '<div style="font-size:0.75em; color:#b9770e;">⚠️ עמוד ללא מספר קריא שויך כהמשך. אם השיוך לא נכון - בטל וסרוק כל מסמך בנפרד.</div>'
-                        : '';
-                    return '<div style="border:1px solid #ddd; border-radius:8px; padding:6px 8px; margin-bottom:6px; background:#fff;">'
-                        + '<b>' + (gi + 1) + '. ' + esc(splitGroupLabel(g, results)) + '</b>'
-                        + '<div style="font-size:0.8em; color:#555;">עמודים: ' + pagesTxt + '</div>' + warn + '</div>';
-                }).join('');
-                overlay.innerHTML = '<div style="background:#fff; width:100%; max-width:520px; max-height:85vh; overflow-y:auto; border-radius:12px; padding:14px; direction:rtl;">'
-                    + '<div style="font-weight:700; margin-bottom:6px;">זוהו ' + groups.length + ' מסמכים נפרדים בקובץ</div>'
-                    + '<div style="font-size:0.85em; color:#555; margin-bottom:8px;">כל מסמך ייפתח לאישור ושמירה בנפרד. הקובץ בתור ההמתנה לא ייסגר לפני שכל המסמכים טופלו.</div>'
-                    + rows
-                    + '<div style="display:flex; gap:8px; margin-top:10px;">'
-                    + '<button id="splitSummaryOk" style="flex:1; background:#27ae60; color:#fff; border:none; border-radius:8px; padding:10px;">המשך לאישור המסמכים</button>'
-                    + '<button id="splitSummaryCancel" style="flex:1; background:#e74c3c; color:#fff; border:none; border-radius:8px; padding:10px;">ביטול</button>'
-                    + '</div></div>';
                 document.body.appendChild(overlay);
                 const done = (val) => { overlay.remove(); resolve(val); };
-                overlay.querySelector('#splitSummaryOk').onclick = () => done(true);
-                overlay.querySelector('#splitSummaryCancel').onclick = () => done(false);
+                const render = () => {
+                    const groups = regroupWithDecisions(results, decisions);
+                    const allDecided = splitInfo.ambiguous.every(i => decisions[String(i)]);
+                    const rows = groups.map((g, gi) => {
+                        const p = splitGroupParts(g, results);
+                        const amtHtml = (p.amount === null) ? '' : ', <span dir="ltr">' + p.amount + ' ₪</span>';
+                        const noNumNote = p.noNumber ? '<div style="font-size:0.75em; color:#b9770e;">ללא מספר שזוהה - יושלם ידנית במסך האישור.</div>' : '';
+                        return '<div style="border:1px solid #ddd; border-radius:8px; padding:6px 8px; margin-bottom:6px; background:#fff;">'
+                            + '<b>' + (gi + 1) + '. ' + esc(p.kind) + (p.num ? ' מספר ' + esc(p.num) : '') + (p.sup ? ', ' + esc(p.sup) : '') + amtHtml + '</b>'
+                            + '<div style="font-size:0.8em; color:#555;">עמודים: ' + p.pages.join(', ') + '</div>' + noNumNote + '</div>';
+                    }).join('');
+                    const decisionRows = splitInfo.ambiguous.map(i => {
+                        const chosen = decisions[String(i)] || '';
+                        return '<div style="border:1px solid #e67e22; border-radius:8px; padding:6px 8px; margin-bottom:6px; background:#fff8f0;">'
+                            + '<div style="font-size:0.85em; font-weight:600;">עמוד ' + (i + 1) + ' - לא נקרא מספר חשבונית. מה זה?</div>'
+                            + '<label style="display:block; font-size:0.85em; margin-top:3px;"><input type="radio" name="splitDec' + i + '" value="continue"' + (chosen === 'continue' ? ' checked' : '') + '> המשך של המסמך הקודם</label>'
+                            + '<label style="display:block; font-size:0.85em;"><input type="radio" name="splitDec' + i + '" value="new"' + (chosen === 'new' ? ' checked' : '') + '> מסמך חדש</label></div>';
+                    }).join('');
+                    overlay.innerHTML = '<div style="background:#fff; width:100%; max-width:520px; max-height:85vh; overflow-y:auto; border-radius:12px; padding:14px; direction:rtl;">'
+                        + '<div style="font-weight:700; margin-bottom:6px;" id="splitSummaryTitle">זוהו ' + groups.length + ' מסמכים נפרדים בקובץ</div>'
+                        + '<div style="font-size:0.85em; color:#555; margin-bottom:8px;">כל מסמך ייפתח לאישור ושמירה בנפרד. הקובץ בתור ההמתנה לא ייסגר לפני שכל המסמכים טופלו.</div>'
+                        + rows + decisionRows
+                        + '<div style="display:flex; gap:8px; margin-top:10px;">'
+                        + '<button id="splitSummaryOk" style="flex:1; background:#27ae60; color:#fff; border:none; border-radius:8px; padding:10px;"' + (allDecided ? '' : ' disabled') + '>המשך לאישור המסמכים</button>'
+                        + '<button id="splitSummaryCancel" style="flex:1; background:#e74c3c; color:#fff; border:none; border-radius:8px; padding:10px;">ביטול</button>'
+                        + '</div></div>';
+                    splitInfo.ambiguous.forEach(i => {
+                        overlay.querySelectorAll('input[name="splitDec' + i + '"]').forEach(radio => {
+                            radio.onchange = () => { decisions[String(i)] = radio.value; render(); };
+                        });
+                    });
+                    const okBtn = overlay.querySelector('#splitSummaryOk');
+                    okBtn.style.opacity = allDecided ? '1' : '0.5';
+                    okBtn.onclick = () => { if (splitInfo.ambiguous.every(i => decisions[String(i)])) done(regroupWithDecisions(results, decisions)); };
+                    overlay.querySelector('#splitSummaryCancel').onclick = () => done(null);
+                };
+                render();
             });
         }
 
@@ -2637,7 +2690,9 @@
             currentScanPages = subPages.slice();
             currentScanResults = subResults.slice();
             recognizedPageCount = subPages.length;
-            recognizedImageBase64 = await buildScanPreview(subPages);
+            // scanPreviewPromise עודכן למסמך הנוכחי - השמירה ממתינה לו (ולא לבנייה של מסמך קודם)
+            scanPreviewPromise = (async () => { recognizedImageBase64 = await buildScanPreview(subPages); })();
+            await scanPreviewPromise;
             await initPageSelection(subPages);
             lastAutoAmount = (typeof parsed.amount === 'number') ? parsed.amount : null;
             const det = detectDocType(parsed);
@@ -2733,15 +2788,19 @@
                 };
                 await Promise.all(Array.from({ length: Math.min(3, pages.length) }, worker));
 
-                // פיצול: מספרי מסמך שונים בין העמודים = מסמכים נפרדים, כל אחד מאושר ונשמר בנפרד
-                const splitGroups = (pages.length > 1) ? groupScanPages(results) : null;
-                if (splitGroups && splitGroups.length > 1) {
+                // פיצול: מספרי מסמך שונים בין העמודים = מסמכים נפרדים, כל אחד מאושר ונשמר בנפרד.
+                // עמוד ללא מספר עם סימני מסמך חדש גם הוא פותח את מסך הפיצול - שם המשתמש מכריע כל שיוך.
+                const splitInfo = (pages.length > 1) ? groupScanPages(results) : null;
+                const splitNeeded = splitInfo && (splitInfo.groups.length > 1
+                    || splitInfo.ambiguous.some(i => unnumberedLooksNewDoc(results[i], splitInfo.groupOf[i])));
+                if (splitNeeded) {
                     try { await hdrPromise; } catch (e) {}   // במצב פיצול לא משתמשים בקריאת הכותרת הנפרדת
-                    if (await showSplitSummary(splitGroups, results)) {
-                        splitScanState = { groups: splitGroups, pages: pages.slice(), results: results.slice(), idx: 0 };
+                    const decidedGroups = await showSplitSummary(results, splitInfo);
+                    if (decidedGroups) {
+                        splitScanState = { groups: decidedGroups, pages: pages.slice(), results: results.slice(), idx: 0 };
                         await presentSplitDocument();
                     } else {
-                        openInvoiceConfirmForm(null, null);   // ביטול הפיצול - מילוי ידני בלבד
+                        openInvoiceConfirmForm(null, null);   // ביטול הפיצול - מילוי ידני בלבד, בלי מיזוג שקט
                     }
                     return;
                 }
@@ -3103,7 +3162,7 @@
         function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {
             // מזהה יציב לכל מסמך בנפרד (גם בפיצול) - ניסיון שמירה חוזר דורס את אותו מסמך ולא יוצר כפילות
             pendingNewDocId = pendingInboxItem && pendingInboxItem.originalPath
-                ? (splitScanState ? pendingInboxItem.id + '__doc' + (splitScanState.idx + 1) : pendingInboxItem.id)
+                ? (splitScanState ? pendingInboxItem.id + '__' + splitDocKey(splitScanState.groups[splitScanState.idx]) : pendingInboxItem.id)
                 : null;
             const confirmForm = document.getElementById('invoiceConfirmForm');
             const imgWrap = document.getElementById('invoicePreviewImgWrap');

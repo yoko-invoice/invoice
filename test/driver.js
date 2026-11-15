@@ -1,6 +1,6 @@
 // Integration test driver for the invoice-split feature.
 // Runs inside the app page (test-harness.html) against stubbed Firebase/recognition.
-import { __store, __seed } from './firebase-stub.js';
+import { __store, __seed, __failNextWrite } from './firebase-stub.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') || 'saveall';
 const SUP = 'ספק בדיקה בע"מ';
@@ -55,6 +55,11 @@ window.appConfirm = async (msg) => {
 window.appPrompt = async () => window.__promptAnswer;
 const origAlert = window.alert;
 window.alert = (m) => { window.__alerts.push(String(m)); origAlert(m); };
+window.__toasts = [];
+window.addEventListener('load', () => {
+  const origToast = window.showToast;
+  if (typeof origToast === 'function') window.showToast = (m, t) => { window.__toasts.push(String(m)); return origToast(m, t); };
+});
 window.print = () => { window.__prints = document.querySelectorAll('#printArea img').length; };
 
 const realFetch = window.fetch.bind(window);
@@ -79,7 +84,7 @@ window.__canned = NUMS.map((n, i) => ({
   isCredit: i < 3, docType: 'invoice', amount: AMTS[i],
   items: [{ name: 'item' + (i + 1), quantity: 1, price: AMTS[i] }], paymentMethod: 'כרטיס אשראי', handwrittenNotes: []
 }));
-if (scenario === 'ambiguity' || scenario === 'regroup-partial') {
+if (scenario === 'ambiguity' || scenario === 'regroup-partial' || scenario === 'mixedowner' || scenario === 'partialclose') {
   window.__canned[1] = { supplier: '', items: [{ name: 'cont', quantity: 1, price: 80 }], handwrittenNotes: [] };
 }
 if (scenario === 'allmissing') {
@@ -443,6 +448,98 @@ try {
     }
   }
 
+  else if (scenario === 'savefault') {
+    await openItemFromInbox();
+    await waitSummary();
+    clickOkSummary();
+    await waitDocForm(1, 4);
+    __failNextWrite('yoko_inbox/');   // the ownership write fails inside the batch -> whole save must roll back
+    fillSupplierAndSave();
+    await waitFor(() => window.__alerts.some(a => a.includes('שגיאה בשמירת')), 'save error alert');
+    log('failed save alerted', true);
+    log('no numbered invoice record written', !invoiceDocs().some(d => d.invoiceNumber === '22889733'));
+    log('no ownership claimed on failure', !inboxDoc().splitOwners || !inboxDoc().splitOwners['1']);
+    log('form stays open after failure', formVisible());
+    log('inbox still pending', inboxDoc() && inboxDoc().status === 'pending');
+    fillSupplierAndSave();   // retry without failure
+    await waitSavedAlert(1);
+    const docs = invoiceDocs();
+    log('retry saved single record', docs.length === 1 && docs[0].id === keyOf('22889733', SUP, 'credit'), docs.map(d => d.id).join(','));
+    log('ownership claimed after success', inboxDoc().splitOwners && inboxDoc().splitOwners['1'] === docs[0].id);
+    await waitDocForm(2, 4);
+    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+  }
+
+  else if (scenario === 'mixedowner') {
+    // run 1: page2 continues doc1 -> doc1 = pages 1-2 saved; cancel at doc2
+    await openItemFromInbox();
+    const ov = await waitSummary();
+    ov.querySelector('input[name="splitDec1"][value="continue"]').click();
+    await waitFor(() => document.querySelector('#splitSummaryTitle').textContent.includes('זוהו 3 מסמכים'), 'regroup 3');
+    clickOkSummary();
+    await waitDocForm(1, 3);
+    fillSupplierAndSave();
+    await waitSavedAlert(1);
+    await waitDocForm(2, 3);
+    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await sleep(300);
+    // run 2: page2 declared "part of next" -> group [2,3] mixes saved page 2 with unsaved page 3
+    await openItemFromInbox();
+    await waitSummary();
+    document.querySelector('input[name="splitDec1"][value="next"]').click();
+    await waitFor(() => document.querySelector('#splitSummaryTitle').textContent.includes('זוהו 3 מסמכים'), 'regroup mixed');
+    clickOkSummary();
+    window.__confirmScript = [{ match: 'כבר נשמר בעבר', answer: false }, { match: 'שים לב', answer: false }];
+    await waitFor(() => formVisible() && document.getElementById('invoiceNumberInput').value === '22890297', 'mixed group form');
+    window.__step = 'mix1';
+    log('fully-owned doc skipped first', window.__confirms.some(c => c.includes('כבר נשמר בעבר')));
+    window.__step = 'mix2';
+    log('mixed warning shown', window.__confirms.some(c => c.includes('שים לב')));
+    const boxes = [...document.querySelectorAll('#pageSelectorBox input[type=checkbox]')];
+    window.__step = 'mix3';
+    log('owned page unchecked, unsaved kept', boxes.length === 2 && !boxes[0].checked && boxes[1].checked, boxes.map(b => b.checked).join(','));
+    fillSupplierAndSave();
+    await waitSavedAlert(2);
+    const d3 = invoiceDocs().find(d => d.id === keyOf('22890297', SUP, 'credit'));
+    window.__step = 'mix4';
+    log('only unsaved page saved', d3 && d3.pageCount === 1, d3 && String(d3.pageCount));
+    window.__step = 'mix5';
+    log('page 2 still owned by doc1', inboxDoc().splitOwners['2'] === keyOf('22889733', SUP, 'credit'));
+    window.__step = 'mix6';
+    log('page 3 owned by new record', inboxDoc().splitOwners['3'] === d3.id);
+    await waitDocForm(3, 3);
+    fillSupplierAndSave();
+    await waitSavedAlert(3);
+    await waitFor(() => inboxDoc() && inboxDoc().status === 'approved', 'inbox approved only after all pages saved');
+    window.__step = 'mix7';
+    log('inbox approved when complete', true);
+    window.__step = 'mix8';
+    log('no duplicate records', invoiceDocs().length === 3, invoiceDocs().map(d => d.id).join(','));
+  }
+
+  else if (scenario === 'partialclose') {
+    await openItemFromInbox();
+    const ov = await waitSummary();
+    ov.querySelector('input[name="splitDec1"][value="continue"]').click();
+    await waitFor(() => document.querySelector('#splitSummaryTitle').textContent.includes('זוהו 3 מסמכים'), 'regroup 3');
+    clickOkSummary();
+    await waitDocForm(1, 3);
+    [...document.querySelectorAll('#pageSelectorBox input[type=checkbox]')][1].click();   // uncheck doc1's second page
+    await sleep(400);
+    fillSupplierAndSave();
+    await waitSavedAlert(1);
+    log('doc1 saved without page 2', invoiceDocs().length === 1 && invoiceDocs()[0].pageCount === 1);
+    log('page 2 not owned', !inboxDoc().splitOwners || !inboxDoc().splitOwners['2']);
+    for (let k = 2; k <= 3; k++) {
+      await waitDocForm(k, 3);
+      fillSupplierAndSave();
+      await waitSavedAlert(k);
+    }
+    await sleep(400);
+    log('inbox NOT closed with unowned page', inboxDoc() && inboxDoc().status === 'pending');
+    log('user told which pages remain', window.__toasts && window.__toasts.some(t => t.includes('עמודים 2')), JSON.stringify(window.__toasts || []));
+  }
+
   else if (scenario === 'shot-ambiguity') {
     if (window.__canned[1].invoiceNumber) window.__canned[1] = { supplier: '', items: [{ name: 'cont', quantity: 1, price: 80 }], handwrittenNotes: [] };
     await openItemFromInbox();
@@ -471,7 +568,7 @@ try {
 } catch (e) {
   if (e && e.__shot) { /* screenshot scenario: leave the page as-is for the runner */ }
   else {
-    log('driver exception', false, String(e && e.message || e));
+    log('driver exception', false, (window.__step || '?') + ' :: ' + String(e && (e.stack || e.message) || e).slice(0,400));
     finish(true);
   }
 }

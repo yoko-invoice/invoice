@@ -1672,20 +1672,32 @@
                     })();
                 }
 
-                await ackOrQueue(setDoc(doc(getInvoicesCollection(), noteId), data, { merge: true }), 20000, "שמירת התעודה");
+                const splitSave = (splitScanState && pendingInboxItem && pendingInboxItem.originalPath)
+                    ? { item: pendingInboxItem, group: splitScanState.groups[splitScanState.idx] } : null;
+                if (splitSave) {
+                    const ownersWrite = splitOwnershipWrite(splitSave.item, splitSave.group, noteId, { number: noteNumber, supplier, kind: 'תעודת משלוח' });
+                    const batch = writeBatch();
+                    batch.set(doc(getInvoicesCollection(), noteId), data, { merge: true });
+                    batch.set(doc(inboxCol(), splitSave.item.id), ownersWrite, { merge: true });
+                    await ackOrQueue(batch.commit(), 20000, "שמירת התעודה");
+                    splitSave.item.splitOwners = ownersWrite.splitOwners;
+                    splitSave.item.splitOwnersMeta = ownersWrite.splitOwnersMeta;
+                } else {
+                    await ackOrQueue(setDoc(doc(getInvoicesCollection(), noteId), data, { merge: true }), 20000, "שמירת התעודה");
+                }
                 if (!isUpdate && amount >= 0) {
                     try { await updatePriceBook(supplier, items, noteDate, 'delivery_note'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
 
-                if (splitScanState && pendingInboxItem && pendingInboxItem.originalPath) {
-                    await recordSplitOwnership(pendingInboxItem, splitScanState.groups[splitScanState.idx], noteId, { number: noteNumber, supplier, kind: 'תעודת משלוח' });
-                }
-                if (splitScanState && pendingInboxItem && pendingInboxItem.originalPath) {
-                    await recordSplitOwnership(pendingInboxItem, splitScanState.groups[splitScanState.idx], invoiceId, { number: invoiceNumber, supplier, kind: amount < 0 ? 'חשבונית זיכוי' : (isIncome ? 'חשבונית הכנסה' : 'חשבונית') });
-                }
                 const moreSplitDocs = splitScanState && (splitScanState.idx + 1 < splitScanState.groups.length);
-                // בפיצול, פריט ההמתנה נסגר רק אחרי שהמסמך האחרון בסדרה נשמר - לא באמצע
-                if (!moreSplitDocs) { try { markInboxDone(noteNumber, amount); } catch (e) {} }
+                // בפיצול, פריט ההמתנה נסגר רק כשכל עמוד מקור בקובץ נשמר - לא סתם בסוף הסדרה
+                if (!moreSplitDocs) {
+                    if (!splitScanState || splitAllPagesAccounted(pendingInboxItem, splitScanState)) {
+                        try { markInboxDone(noteNumber, amount); } catch (e) {}
+                    } else {
+                        showToast('עמודים ' + splitUnaccountedPages(pendingInboxItem, splitScanState).join(', ') + ' עוד לא נשמרו - הפריט נשאר בתור ההמתנה.', 'err');
+                    }
+                }
                 document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
                 if (!moreSplitDocs) { reopenInboxIfNeeded(); splitScanState = null; }
                 recognizedImageBase64 = null;
@@ -2652,14 +2664,27 @@
 
         // מיפוי עמודי מקור -> רשומה שנשמרה, נשמר על פריט התור אחרי שמירה מוצלחת בלבד.
         // מאפשר המשך אחרי ביטול/רענון בלי ליצור רשומה כפולה לאותם עמודים, גם אם הזהות נערכה.
-        async function recordSplitOwnership(item, group, invoiceId, meta) {
+        // העמודים (במספרי הקובץ המקור) שנכללים בפועל בשמירה הנוכחית - רק המסומנים בבורר העמודים
+        function splitSavedPageNumbers(group) {
+            return group.pageIdxs.filter((p, j) => selectedScanPages[j] !== false).map(p => p + 1);
+        }
+        // בונה את עדכון הבעלות לשמירה הנוכחית; נכתב באותו batch אטומי עם רשומת המסמך עצמה -
+        // או ששניהם נשמרים או שאף אחד, כך שכשל ברשת לא משאיר רשומה בלי בעלות (שהייתה מייצרת כפילות ב-retry)
+        function splitOwnershipWrite(item, group, invoiceId, meta) {
             const owners = Object.assign({}, item.splitOwners || {});
-            group.pageIdxs.forEach(p => { owners[String(p + 1)] = invoiceId; });
+            splitSavedPageNumbers(group).forEach(p => { owners[String(p)] = invoiceId; });
             const ownersMeta = Object.assign({}, item.splitOwnersMeta || {});
             ownersMeta[invoiceId] = meta;
-            item.splitOwners = owners; item.splitOwnersMeta = ownersMeta;
-            try { await setDoc(doc(inboxCol(), item.id), { splitOwners: owners, splitOwnersMeta: ownersMeta }, { merge: true }); }
-            catch (e) { console.warn('שמירת מיפוי הפיצול נכשלה:', e); }
+            return { splitOwners: owners, splitOwnersMeta: ownersMeta };
+        }
+        // סגירת פריט התור מותרת רק כשכל עמוד מקור בקובץ נשמר באיזושהי רשומה - לא סתם "הגענו לקבוצה האחרונה"
+        function splitAllPagesAccounted(item, st) {
+            const owners = (item && item.splitOwners) || {};
+            return st.pages.every((_, i) => owners[String(i + 1)]);
+        }
+        function splitUnaccountedPages(item, st) {
+            const owners = (item && item.splitOwners) || {};
+            return st.pages.map((_, i) => i + 1).filter(p => !owners[String(p)]);
         }
         // דילוג על מסמך שכבר נשמר: מתקדם למסמך הבא, ובסוף הסדרה סוגר את פריט התור
         async function advanceSplitSkip() {
@@ -2667,14 +2692,17 @@
             st.idx++;
             if (st.idx < st.groups.length) { await presentSplitDocument(); return; }
             const it = pendingInboxItem;
+            const st2 = splitScanState;
             splitScanState = null;
             document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
-            if (it) {
+            if (it && splitAllPagesAccounted(it, st2)) {
                 try { await setDoc(doc(inboxCol(), it.id), { status: 'approved', approvedAt: new Date().toISOString() }, { merge: true }); } catch (e) {}
                 pendingInboxItem = null;
+                showToast('כל המסמכים בקובץ כבר נשמרו - הפריט בתור נסגר.');
+            } else {
+                showToast('עמודים ' + splitUnaccountedPages(it, st2).join(', ') + ' עוד לא נשמרו - הפריט נשאר בתור ההמתנה.', 'err');
             }
             reopenInboxIfNeeded();
-            showToast('כל המסמכים בקובץ כבר נשמרו - הפריט בתור נסגר.');
         }
         // פותח רשומה קיימת לעריכה מתוך סדרת הפיצול (במקום ליצור רשומה חדשה לאותם עמודים)
         async function openExistingForSplitEdit(invoiceId) {
@@ -2764,20 +2792,33 @@
             const st = splitScanState;
             if (!st) return;
             const g = st.groups[st.idx];
-            // עמודים שכבר נשמרו בעבר (גם אם הזהות נערכה ביד): לא יוצרים רשומה כפולה -
-            // מציעים לערוך את הרשומה הקיימת או לדלג. המיפוי נשמר על פריט התור ולכן שורד ביטול/רענון.
+            // עמודים שכבר נשמרו בעבר (גם אם הזהות נערכה ביד): לא יוצרים רשומה כפולה.
+            // המיפוי נשמר על פריט התור ולכן שורד ביטול/רענון.
+            // מסמך שכולו שמור: מציעים עריכה של הרשומה הקיימת או דילוג.
+            // מסמך מעורב (חלק שמור חלק לא): אין דילוג - עריכה של הקיימת, או המשך לשמירת העמודים החדשים בלבד.
             const owners = (pendingInboxItem && pendingInboxItem.splitOwners) || {};
-            const ownerIds = [...new Set(g.pageIdxs.map(p => owners[String(p + 1)]).filter(Boolean))];
+            const ownerOf = p => owners[String(p + 1)];
+            const ownerIds = [...new Set(g.pageIdxs.map(ownerOf).filter(Boolean))];
             if (ownerIds.length) {
                 const first = ownerIds[0];
                 const meta = ((pendingInboxItem.splitOwnersMeta || {})[first]) || {};
                 const pagesText = g.pageIdxs.map(p => p + 1).join(', ');
-                const allSame = ownerIds.length === 1 && g.pageIdxs.every(p => owners[String(p + 1)] === first);
-                const msg = allSame
-                    ? 'המסמך הזה (עמודים ' + pagesText + ') כבר נשמר בעבר' + (meta.number ? ' כמסמך מספר ' + meta.number : '') + (meta.supplier ? ' של ' + meta.supplier : '') + '.\nלערוך את הרשומה הקיימת?\n(ביטול = דילוג, בלי ליצור רשומה כפולה)'
-                    : 'חלק מהעמודים (' + pagesText + ') כבר נשמרו ברשומות קודמות מהקובץ הזה.\nלערוך את הרשומה הקיימת הראשונה?\n(ביטול = דילוג, בלי ליצור רשומה כפולה)';
-                if (await appConfirm(msg)) { if (await openExistingForSplitEdit(first)) return; }
-                else { await advanceSplitSkip(); return; }
+                const unowned = g.pageIdxs.filter(p => !ownerOf(p));
+                const what = (meta.number ? ' מספר ' + meta.number : '') + (meta.supplier ? ' של ' + meta.supplier : '');
+                let msg;
+                if (!unowned.length && ownerIds.length === 1) {
+                    msg = 'המסמך הזה (עמודים ' + pagesText + ') כבר נשמר בעבר כמסמך' + what + '.\nלערוך את הרשומה הקיימת?\n(ביטול = דילוג, בלי ליצור רשומה כפולה)';
+                    if (await appConfirm(msg)) { if (await openExistingForSplitEdit(first)) return; }
+                    else { await advanceSplitSkip(); return; }
+                } else if (!unowned.length) {
+                    msg = 'העמודים האלה (' + pagesText + ') כבר נשמרו בכמה רשומות נפרדות מהקובץ הזה.\nלערוך את הרשומה הראשונה (' + what + ')?\n(ביטול = דילוג, בלי ליצור רשומה כפולה)';
+                    if (await appConfirm(msg)) { if (await openExistingForSplitEdit(first)) return; }
+                    else { await advanceSplitSkip(); return; }
+                } else {
+                    const ownedText = g.pageIdxs.filter(p => ownerOf(p)).map(p => p + 1).join(', ');
+                    msg = 'שים לב: עמודים ' + ownedText + ' כבר נשמרו בעבר כמסמך' + what + ', ועמודים ' + unowned.map(p => p + 1).join(', ') + ' עוד לא נשמרו.\nלערוך את הרשומה הקיימת?\n(ביטול = המשך לשמירת העמודים שטרם נשמרו בלבד - העמודים השמורים יסומנו כלא נבחרים)';
+                    if (await appConfirm(msg)) { if (await openExistingForSplitEdit(first)) return; }
+                }
             }
             const subPages = g.pageIdxs.map(i => st.pages[i]);
             const subResults = g.pageIdxs.map(i => st.results[i]);
@@ -2793,6 +2834,13 @@
             scanPreviewPromise = (async () => { recognizedImageBase64 = await buildScanPreview(subPages); })();
             await scanPreviewPromise;
             await initPageSelection(subPages);
+            const ownedSel = g.pageIdxs.map((p, j) => owners[String(p + 1)] ? j : -1).filter(j => j >= 0);
+            if (ownedSel.length) {
+                ownedSel.forEach(j => { selectedScanPages[j] = false; });
+                scanPreviewPromise = rebuildScanPreview();
+                await scanPreviewPromise;
+                showToast('עמודים שכבר נשמרו הוסרו מהבחירה - יישמרו רק העמודים שטרם נשמרו.');
+            }
             lastAutoAmount = (typeof parsed.amount === 'number') ? parsed.amount : null;
             const det = detectDocType(parsed);
             scanMode = det.type;
@@ -3584,22 +3632,36 @@
                     })();
                 }
 
-                await ackOrQueue(
-                    setDoc(doc(getInvoicesCollection(), invoiceId), invData, { merge: true }),
-                    20000,
-                    "שמירת החשבונית"
-                );
+                const splitSave = (splitScanState && pendingInboxItem && pendingInboxItem.originalPath)
+                    ? { item: pendingInboxItem, group: splitScanState.groups[splitScanState.idx] } : null;
+                if (splitSave) {
+                    const meta = { number: invoiceNumber, supplier, kind: amount < 0 ? 'חשבונית זיכוי' : (isIncome ? 'חשבונית הכנסה' : 'חשבונית') };
+                    const ownersWrite = splitOwnershipWrite(splitSave.item, splitSave.group, invoiceId, meta);
+                    const batch = writeBatch();
+                    batch.set(doc(getInvoicesCollection(), invoiceId), invData, { merge: true });
+                    batch.set(doc(inboxCol(), splitSave.item.id), ownersWrite, { merge: true });
+                    await ackOrQueue(batch.commit(), 20000, "שמירת החשבונית");
+                    splitSave.item.splitOwners = ownersWrite.splitOwners;   // מצב מקומי רק אחרי הצלחה
+                    splitSave.item.splitOwnersMeta = ownersWrite.splitOwnersMeta;
+                } else {
+                    await ackOrQueue(
+                        setDoc(doc(getInvoicesCollection(), invoiceId), invData, { merge: true }),
+                        20000,
+                        "שמירת החשבונית"
+                    );
+                }
                 if (!isIncome && !isUpdate && amount > 0) {
                     try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
-                if (splitScanState && pendingInboxItem && pendingInboxItem.originalPath) {
-                    await recordSplitOwnership(pendingInboxItem, splitScanState.groups[splitScanState.idx], invoiceId, { number: invoiceNumber, supplier, kind: amount < 0 ? 'חשבונית זיכוי' : (isIncome ? 'חשבונית הכנסה' : 'חשבונית') });
-                }
                 const moreSplitDocs = splitScanState && (splitScanState.idx + 1 < splitScanState.groups.length);
-                // בפיצול, פריט ההמתנה נסגר רק אחרי שהמסמך האחרון בסדרה נשמר - לא באמצע
+                // בפיצול, פריט ההמתנה נסגר רק כשכל עמוד מקור בקובץ נשמר - לא סתם בסוף הסדרה
                 if (!moreSplitDocs) {
-                    try { markInboxDone(invoiceNumber, amount); } catch (e) {}
-                    pendingInboxItem = null;   // גם אם הפריט לא סומן כטופל, הוא לא יסמן חשבונית עתידית בטעות
+                    if (!splitScanState || splitAllPagesAccounted(pendingInboxItem, splitScanState)) {
+                        try { markInboxDone(invoiceNumber, amount); } catch (e) {}
+                        pendingInboxItem = null;   // גם אם הפריט לא סומן כטופל, הוא לא יסמן חשבונית עתידית בטעות
+                    } else {
+                        showToast('עמודים ' + splitUnaccountedPages(pendingInboxItem, splitScanState).join(', ') + ' עוד לא נשמרו - הפריט נשאר בתור ההמתנה.', 'err');
+                    }
                     splitScanState = null;
                 }
                 document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);

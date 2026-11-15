@@ -5,7 +5,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const PORT = 8631;
-const SCENARIOS = process.argv[2] ? process.argv[2].split(',') : ['saveall', 'ambiguity', 'cancel-resume', 'dupblock', 'print', 'supcollide', 'typecollide', 'allmissing', 'editresume', 'regroup-partial', 'reloadresume'];
+const SCENARIOS = process.argv[2] ? process.argv[2].split(',') : ['saveall', 'ambiguity', 'cancel-resume', 'dupblock', 'print', 'supcollide', 'typecollide', 'allmissing', 'editresume', 'regroup-partial', 'reloadresume', 'savefault', 'mixedowner', 'partialclose'];
 const RUN = String(Date.now());
 const SHOTS = process.argv[3] === 'shots';
 

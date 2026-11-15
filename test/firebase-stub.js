@@ -45,7 +45,10 @@ export async function getDocs(q) {
   const docs = snapFor(q).docs.map(x => ({ id: x.id, data: x.data }));
   return { docs, size: docs.length, empty: docs.length === 0, forEach: (cb) => docs.forEach(cb) };
 }
+let __failPrefix = null;
+export function __failNextWrite(prefix) { __failPrefix = prefix; }
 export async function setDoc(ref, data, opts) {
+  if (__failPrefix && ref.path.startsWith(__failPrefix)) { __failPrefix = null; throw new Error('injected write failure'); }
   const cur = (opts && opts.merge) ? (store.get(ref.path) || {}) : {};
   const out = { ...cur };
   for (const [k, v] of Object.entries(data)) { if (v === DELETED) delete out[k]; else out[k] = v; }
@@ -63,10 +66,23 @@ export function onSnapshot(ref, cb, errcb) {
 export function writeBatch() {
   const ops = [];
   return {
-    set: (r, d, o) => ops.push(() => setDoc(r, d, o)),
-    update: (r, d) => ops.push(() => setDoc(r, d, { merge: true })),
-    delete: (r) => ops.push(() => deleteDoc(r)),
-    commit: async () => { for (const o of ops) await o(); }
+    set: (r, d, o) => ops.push({ r, run: () => setDoc(r, d, o) }),
+    update: (r, d) => ops.push({ r, run: () => setDoc(r, d, { merge: true }) }),
+    delete: (r) => ops.push({ r, run: () => deleteDoc(r) }),
+    // atomic like real Firestore: any failure rolls back every write in the batch
+    commit: async () => {
+      const backup = new Map();
+      try {
+        for (const o of ops) {
+          if (!backup.has(o.r.path)) backup.set(o.r.path, store.has(o.r.path) ? store.get(o.r.path) : undefined);
+          await o.run();
+        }
+      } catch (e) {
+        for (const [p, v] of backup) { if (v === undefined) store.delete(p); else store.set(p, v); }
+        persist();
+        throw e;
+      }
+    }
   };
 }
 export function getStorage() { return {}; }

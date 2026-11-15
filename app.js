@@ -1673,7 +1673,7 @@
                     })();
                 }
 
-                const splitSave = (splitScanState && pendingInboxItem && pendingInboxItem.originalPath)
+                const splitSave = (splitScanState && pendingInboxItem)
                     ? { item: pendingInboxItem, group: splitScanState.groups[splitScanState.idx] } : null;
                 if (splitSave) {
                     const ownersWrite = splitOwnershipWrite(splitSave.item, splitSave.group, noteId, { number: noteNumber, supplier, kind: 'תעודת משלוח' });
@@ -2655,7 +2655,7 @@
         // בשמירה בתוך פיצול: המזהה נגזר מהזהות הסופית בטופס (אחרי עריכת המשתמש), כך שניסיון חוזר עם
         // אותן בחירות דורס את אותו מסמך. אם אותה זהות כבר נשמרה כמסמך אחר בסדרה - לא דורסים אותו.
         function applySplitSaveIdentity(number, supplier, kind) {
-            if (editingInvoiceId || !splitScanState || !pendingInboxItem || !pendingInboxItem.originalPath) return;
+            if (editingInvoiceId || !splitScanState || !pendingInboxItem) return;
             const g = splitScanState.groups[splitScanState.idx];
             const n = String(number || '').replace(/\D/g, '');
             const base = n ? 'n' + n : 'p' + (((g && g.pageIdxs[0]) || 0) + 1);
@@ -3315,7 +3315,7 @@
 
         function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {
             // מזהה יציב לכל מסמך בנפרד (גם בפיצול) - ניסיון שמירה חוזר דורס את אותו מסמך ולא יוצר כפילות
-            pendingNewDocId = pendingInboxItem && pendingInboxItem.originalPath
+            pendingNewDocId = pendingInboxItem
                 ? (splitScanState ? pendingInboxItem.id + '__' + splitDocKey(splitScanState.groups[splitScanState.idx], splitScanState.results) : pendingInboxItem.id)
                 : null;
             const confirmForm = document.getElementById('invoiceConfirmForm');
@@ -3640,7 +3640,7 @@
                     })();
                 }
 
-                const splitSave = (splitScanState && pendingInboxItem && pendingInboxItem.originalPath)
+                const splitSave = (splitScanState && pendingInboxItem)
                     ? { item: pendingInboxItem, group: splitScanState.groups[splitScanState.idx] } : null;
                 if (splitSave) {
                     const meta = { number: invoiceNumber, supplier, kind: amount < 0 ? 'חשבונית זיכוי' : (isIncome ? 'חשבונית הכנסה' : 'חשבונית') };

@@ -1,6 +1,10 @@
 // In-memory Firebase stub for local integration testing of the invoice app.
 // Maps the same exports app.js imports from the Firebase CDN modules.
-const store = new Map(); // 'col/id' -> data object; 'storage:path' -> dataURL
+// persisted per scenario+run so a page reload (resume flow) keeps state; isolated between scenarios/runs
+const __params = new URLSearchParams(location.search);
+const PKEY = 'fbstub:' + (__params.get('scenario') || 'default') + ':' + (__params.get('run') || 'x');
+const store = new Map(JSON.parse(localStorage.getItem(PKEY) || '[]')); // 'col/id' -> data object; 'storage:path' -> dataURL
+function persist() { try { localStorage.setItem(PKEY, JSON.stringify([...store.entries()])); } catch (e) {} }
 
 function docsIn(colPathStr) {
   const out = [];
@@ -46,9 +50,10 @@ export async function setDoc(ref, data, opts) {
   const out = { ...cur };
   for (const [k, v] of Object.entries(data)) { if (v === DELETED) delete out[k]; else out[k] = v; }
   store.set(ref.path, out);
+  persist();
   fire();
 }
-export async function deleteDoc(ref) { store.delete(ref.path); fire(); }
+export async function deleteDoc(ref) { store.delete(ref.path); persist(); fire(); }
 export function onSnapshot(ref, cb, errcb) {
   const l = { ref, cb };
   listeners.push(l);
@@ -78,4 +83,4 @@ export async function signInWithCustomToken() {}
 
 // test hooks
 export const __store = store;
-export function __seed(path, data) { store.set(path, data); }
+export function __seed(path, data) { store.set(path, data); persist(); }

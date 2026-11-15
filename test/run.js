@@ -5,7 +5,8 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const PORT = 8631;
-const SCENARIOS = process.argv[2] ? process.argv[2].split(',') : ['saveall', 'ambiguity', 'cancel-resume', 'dupblock', 'print', 'supcollide', 'typecollide', 'allmissing', 'editresume'];
+const SCENARIOS = process.argv[2] ? process.argv[2].split(',') : ['saveall', 'ambiguity', 'cancel-resume', 'dupblock', 'print', 'supcollide', 'typecollide', 'allmissing', 'editresume', 'regroup-partial', 'reloadresume'];
+const RUN = String(Date.now());
 const SHOTS = process.argv[3] === 'shots';
 
 async function runScenario(browser, scenario) {
@@ -14,12 +15,19 @@ async function runScenario(browser, scenario) {
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
-  await page.goto(`http://127.0.0.1:${PORT}/test-harness.html?scenario=${scenario}`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`http://127.0.0.1:${PORT}/test-harness.html?scenario=${scenario}&run=${RUN}`, { waitUntil: 'domcontentloaded' });
+  let settled = false;
   try {
     await page.waitForFunction(() => document.title === 'DONE' || document.title === 'FAIL', { timeout: 90000 });
+    settled = true;
   } catch (e) {
+    if (String(e).includes('Execution context')) {   // scenario reloaded the page (resume flow) - wait on the new context
+      try { await page.waitForFunction(() => document.title === 'DONE' || document.title === 'FAIL', { timeout: 90000 }); settled = true; } catch (e2) {}
+    }
+  }
+  if (!settled) {
     const title = await page.title();
-    const body = await page.evaluate(() => document.body.innerText.slice(0, 800));
+    const body = await page.evaluate(() => document.body.innerText.slice(0, 800)).catch(() => '');
     console.log(`[${scenario}] TIMEOUT (title=${title})\n${body}\npage errors: ${errors.join(' | ')}`);
     await page.close();
     return false;
@@ -35,7 +43,7 @@ async function runScenario(browser, scenario) {
 async function runShot(browser, scenario, waitExpr, file) {
   const page = await browser.newPage();
   await page.setViewport({ width: 480, height: 900 });
-  await page.goto(`http://127.0.0.1:${PORT}/test-harness.html?scenario=${scenario}`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`http://127.0.0.1:${PORT}/test-harness.html?scenario=${scenario}&run=${RUN}`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(waitExpr, { timeout: 90000 });
   await new Promise(r => setTimeout(r, 600));
   await page.screenshot({ path: file });

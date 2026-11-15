@@ -1677,6 +1677,12 @@
                     try { await updatePriceBook(supplier, items, noteDate, 'delivery_note'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
 
+                if (splitScanState && pendingInboxItem && pendingInboxItem.originalPath) {
+                    await recordSplitOwnership(pendingInboxItem, splitScanState.groups[splitScanState.idx], noteId, { number: noteNumber, supplier, kind: 'תעודת משלוח' });
+                }
+                if (splitScanState && pendingInboxItem && pendingInboxItem.originalPath) {
+                    await recordSplitOwnership(pendingInboxItem, splitScanState.groups[splitScanState.idx], invoiceId, { number: invoiceNumber, supplier, kind: amount < 0 ? 'חשבונית זיכוי' : (isIncome ? 'חשבונית הכנסה' : 'חשבונית') });
+                }
                 const moreSplitDocs = splitScanState && (splitScanState.idx + 1 < splitScanState.groups.length);
                 // בפיצול, פריט ההמתנה נסגר רק אחרי שהמסמך האחרון בסדרה נשמר - לא באמצע
                 if (!moreSplitDocs) { try { markInboxDone(noteNumber, amount); } catch (e) {} }
@@ -2632,16 +2638,61 @@
         // בשמירה בתוך פיצול: המזהה נגזר מהזהות הסופית בטופס (אחרי עריכת המשתמש), כך שניסיון חוזר עם
         // אותן בחירות דורס את אותו מסמך. אם אותה זהות כבר נשמרה כמסמך אחר בסדרה - לא דורסים אותו.
         function applySplitSaveIdentity(number, supplier, kind) {
-            if (!splitScanState || !pendingInboxItem || !pendingInboxItem.originalPath) return;
+            if (editingInvoiceId || !splitScanState || !pendingInboxItem || !pendingInboxItem.originalPath) return;
             const g = splitScanState.groups[splitScanState.idx];
             const n = String(number || '').replace(/\D/g, '');
             const base = n ? 'n' + n : 'p' + (((g && g.pageIdxs[0]) || 0) + 1);
             let cand = pendingInboxItem.id + '__' + base + '__s' + (normKeyPart(supplier) || '-') + '__' + (kind || '-');
             splitScanState.claimedIds = splitScanState.claimedIds || {};
             const owner = splitScanState.claimedIds[cand];
-            if (owner !== undefined && owner !== splitScanState.idx) cand = cand + '__x' + Date.now().toString(36);
+            if (owner !== undefined && owner !== splitScanState.idx) cand = cand + '__x' + ((g.pageIdxs[0] || 0) + 1);
             splitScanState.claimedIds[cand] = splitScanState.idx;
             pendingNewDocId = cand;
+        }
+
+        // מיפוי עמודי מקור -> רשומה שנשמרה, נשמר על פריט התור אחרי שמירה מוצלחת בלבד.
+        // מאפשר המשך אחרי ביטול/רענון בלי ליצור רשומה כפולה לאותם עמודים, גם אם הזהות נערכה.
+        async function recordSplitOwnership(item, group, invoiceId, meta) {
+            const owners = Object.assign({}, item.splitOwners || {});
+            group.pageIdxs.forEach(p => { owners[String(p + 1)] = invoiceId; });
+            const ownersMeta = Object.assign({}, item.splitOwnersMeta || {});
+            ownersMeta[invoiceId] = meta;
+            item.splitOwners = owners; item.splitOwnersMeta = ownersMeta;
+            try { await setDoc(doc(inboxCol(), item.id), { splitOwners: owners, splitOwnersMeta: ownersMeta }, { merge: true }); }
+            catch (e) { console.warn('שמירת מיפוי הפיצול נכשלה:', e); }
+        }
+        // דילוג על מסמך שכבר נשמר: מתקדם למסמך הבא, ובסוף הסדרה סוגר את פריט התור
+        async function advanceSplitSkip() {
+            const st = splitScanState;
+            st.idx++;
+            if (st.idx < st.groups.length) { await presentSplitDocument(); return; }
+            const it = pendingInboxItem;
+            splitScanState = null;
+            document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
+            if (it) {
+                try { await setDoc(doc(inboxCol(), it.id), { status: 'approved', approvedAt: new Date().toISOString() }, { merge: true }); } catch (e) {}
+                pendingInboxItem = null;
+            }
+            reopenInboxIfNeeded();
+            showToast('כל המסמכים בקובץ כבר נשמרו - הפריט בתור נסגר.');
+        }
+        // פותח רשומה קיימת לעריכה מתוך סדרת הפיצול (במקום ליצור רשומה חדשה לאותם עמודים)
+        async function openExistingForSplitEdit(invoiceId) {
+            let inv = monthlyInvoices.find(i => i.id === invoiceId) || monthlyIncome.find(i => i.id === invoiceId)
+                || (typeof monthlyNotes !== 'undefined' ? monthlyNotes.find(i => i.id === invoiceId) : null);
+            if (!inv) {
+                try { const snap = await getDoc(doc(getInvoicesCollection(), invoiceId)); if (snap.exists()) inv = Object.assign({ id: invoiceId }, snap.data()); } catch (e) {}
+            }
+            if (!inv) {
+                alert('הרשומה שנשמרה בעבר לא נמצאה - ייתכן שנמחקה. ממשיך לשמירה רגילה של המסמך.');
+                return false;
+            }
+            editingInvoiceId = inv.id;
+            scanMode = (inv.docType === 'income') ? 'income' : 'invoice';
+            recognizedImageBase64 = null;
+            currentScanMeta = null;
+            openInvoiceConfirmForm(null, inv);
+            return true;
         }
         function splitGroupParts(g, results) {
             const merged = mergePageResults(g.pageIdxs.map(i => results[i]));
@@ -2678,7 +2729,7 @@
                         const chosen = decisions[String(i)] || '';
                         const hasPrev = i > 0;
                         const hasNext = results.slice(i + 1).some(r => splitPageNumber(r));
-                        const opt = (val, label) => '<label style="display:block; font-size:0.85em; margin-top:3px;"><input type="radio" name="splitDec' + i + '" value="' + val + '"' + (chosen === val ? ' checked' : '') + '> ' + label + '</label>';
+                        const opt = (val, label) => '<label style="display:flex; flex-direction:row; align-items:center; gap:8px; font-size:0.9em; margin-top:4px; padding:7px 8px; border:1px solid #f0d9bf; border-radius:8px; cursor:pointer;"><input type="radio" style="margin:0; width:18px; height:18px; flex:none;" name="splitDec' + i + '" value="' + val + '"' + (chosen === val ? ' checked' : '') + '><span>' + label + '</span></label>';
                         return '<div style="border:1px solid #e67e22; border-radius:8px; padding:6px 8px; margin-bottom:6px; background:#fff8f0;">'
                             + '<div style="font-size:0.85em; font-weight:600;">עמוד ' + (i + 1) + ' - לא נקרא מספר חשבונית. מה זה?</div>'
                             + (hasPrev ? opt('continue', 'המשך של המסמך הקודם') : '')
@@ -2713,6 +2764,21 @@
             const st = splitScanState;
             if (!st) return;
             const g = st.groups[st.idx];
+            // עמודים שכבר נשמרו בעבר (גם אם הזהות נערכה ביד): לא יוצרים רשומה כפולה -
+            // מציעים לערוך את הרשומה הקיימת או לדלג. המיפוי נשמר על פריט התור ולכן שורד ביטול/רענון.
+            const owners = (pendingInboxItem && pendingInboxItem.splitOwners) || {};
+            const ownerIds = [...new Set(g.pageIdxs.map(p => owners[String(p + 1)]).filter(Boolean))];
+            if (ownerIds.length) {
+                const first = ownerIds[0];
+                const meta = ((pendingInboxItem.splitOwnersMeta || {})[first]) || {};
+                const pagesText = g.pageIdxs.map(p => p + 1).join(', ');
+                const allSame = ownerIds.length === 1 && g.pageIdxs.every(p => owners[String(p + 1)] === first);
+                const msg = allSame
+                    ? 'המסמך הזה (עמודים ' + pagesText + ') כבר נשמר בעבר' + (meta.number ? ' כמסמך מספר ' + meta.number : '') + (meta.supplier ? ' של ' + meta.supplier : '') + '.\nלערוך את הרשומה הקיימת?\n(ביטול = דילוג, בלי ליצור רשומה כפולה)'
+                    : 'חלק מהעמודים (' + pagesText + ') כבר נשמרו ברשומות קודמות מהקובץ הזה.\nלערוך את הרשומה הקיימת הראשונה?\n(ביטול = דילוג, בלי ליצור רשומה כפולה)';
+                if (await appConfirm(msg)) { if (await openExistingForSplitEdit(first)) return; }
+                else { await advanceSplitSkip(); return; }
+            }
             const subPages = g.pageIdxs.map(i => st.pages[i]);
             const subResults = g.pageIdxs.map(i => st.results[i]);
             const parsed = mergePageResults(subResults);
@@ -3525,6 +3591,9 @@
                 );
                 if (!isIncome && !isUpdate && amount > 0) {
                     try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
+                }
+                if (splitScanState && pendingInboxItem && pendingInboxItem.originalPath) {
+                    await recordSplitOwnership(pendingInboxItem, splitScanState.groups[splitScanState.idx], invoiceId, { number: invoiceNumber, supplier, kind: amount < 0 ? 'חשבונית זיכוי' : (isIncome ? 'חשבונית הכנסה' : 'חשבונית') });
                 }
                 const moreSplitDocs = splitScanState && (splitScanState.idx + 1 < splitScanState.groups.length);
                 // בפיצול, פריט ההמתנה נסגר רק אחרי שהמסמך האחרון בסדרה נשמר - לא באמצע

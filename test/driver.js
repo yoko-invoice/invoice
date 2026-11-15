@@ -79,7 +79,7 @@ window.__canned = NUMS.map((n, i) => ({
   isCredit: i < 3, docType: 'invoice', amount: AMTS[i],
   items: [{ name: 'item' + (i + 1), quantity: 1, price: AMTS[i] }], paymentMethod: 'כרטיס אשראי', handwrittenNotes: []
 }));
-if (scenario === 'ambiguity') {
+if (scenario === 'ambiguity' || scenario === 'regroup-partial') {
   window.__canned[1] = { supplier: '', items: [{ name: 'cont', quantity: 1, price: 80 }], handwrittenNotes: [] };
 }
 if (scenario === 'allmissing') {
@@ -111,11 +111,11 @@ for (let i = 1; i <= pdf.numPages; i++) {
 }
 
 // seed the pending queue item + its stored original
-__seed('yoko_inbox/' + INBOX_ID, {
+if (!__store.has('yoko_inbox/' + INBOX_ID)) __seed('yoko_inbox/' + INBOX_ID, {
   status: 'pending', source: 'device', originalPath: ORIGINAL_PATH,
   filename: 'sample.pdf', mime: 'application/pdf', mailDate: new Date().toISOString(), fields: {}, printStatus: 'needed'
 });
-if (scenario === 'dupblock') {
+if (scenario === 'dupblock' && !__store.has('yoko_invoices/existing_dup')) {
   __seed('yoko_invoices/existing_dup', {
     id: 'existing_dup', docType: 'invoice', supplier: SUP, invoiceNumber: '22889946',
     invoiceDate: '2026-11-02', amount: -80, monthKey: '2026-11', items: []
@@ -142,6 +142,9 @@ function fillSupplierAndSave(supName) {
 }
 async function waitSavedAlert(minCount) {
   await waitFor(() => window.__alerts.filter(a => a.includes('נשמרה בהצלחה')).length >= minCount, 'saved alert ' + minCount);
+}
+async function waitOkAlert(minCount) {
+  await waitFor(() => window.__alerts.filter(a => a.includes('בהצלחה')).length >= minCount, 'success alert ' + minCount);
 }
 
 try {
@@ -220,18 +223,22 @@ try {
     await sleep(300);
     log('1 doc saved before cancel', invoiceDocs().length === 1);
     log('inbox pending after cancel', inboxDoc() && inboxDoc().status === 'pending');
-    // resume: reopen the same queue item and re-save doc1
+    log('ownership persisted on queue item', inboxDoc().splitOwners && inboxDoc().splitOwners['1'] === keyOf('22889733', SUP, 'credit'));
+    // resume: recognition runs again, but doc1 pages are owned -> offer edit, not a new record
     await openItemFromInbox();
     await waitSummary();
     clickOkSummary();
-    await waitDocForm(1, 4);
-    window.__confirmScript = [{ match: 'כבר קיימת', answer: true }];
+    window.__confirmScript = [{ match: 'כבר נשמר', answer: true }];
+    await waitFor(() => formVisible(), 'edit form for owned doc');
+    log('ownership edit confirm shown', window.__confirms.some(c => c.includes('כבר נשמר')));
+    log('existing record opened with its values', document.getElementById('invoiceNumberInput').value === '22889733');
     fillSupplierAndSave();
-    await waitSavedAlert(2);
+    await waitOkAlert(2);
     const docs = invoiceDocs();
-    log('resume re-save overwrote same id', docs.length === 1 && docs[0].id === keyOf('22889733', SUP, 'credit'), docs.map(d => d.id).join(','));
-    log('duplicate confirm was shown', window.__confirms.some(c => c.includes('כבר קיימת')));
+    log('resume update kept single record', docs.length === 1 && docs[0].id === keyOf('22889733', SUP, 'credit'), docs.map(d => d.id).join(','));
     log('second recognition round happened', window.__recogCalls.length === 8, String(window.__recogCalls.length));
+    await waitDocForm(2, 4);
+    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
   }
 
   else if (scenario === 'dupblock') {
@@ -341,24 +348,99 @@ try {
     await waitSavedAlert(1);
     const edited = invoiceDocs().find(d => d.invoiceNumber === '99999');
     log('edited identity saved under edited key', edited && edited.id === keyOf('99999', SUP, 'credit'), edited && edited.id);
+    log('ownership meta kept', inboxDoc().splitOwnersMeta && inboxDoc().splitOwnersMeta[edited.id].number === '99999');
     await waitDocForm(2, 4);
     [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
     await sleep(300);
+    // resume with edit: the edited record opens, no second record
     await openItemFromInbox();
     await waitSummary();
     clickOkSummary();
-    await waitDocForm(1, 4);
-    log('detected number restored on resume', document.getElementById('invoiceNumberInput').value === '22889733');
+    window.__confirmScript = [{ match: 'כבר נשמר', answer: true }];
+    await waitFor(() => formVisible(), 'edit form for edited doc');
+    log('edited identity retained for edit', document.getElementById('invoiceNumberInput').value === '99999');
+    fillSupplierAndSave();
+    await waitOkAlert(2);
+    let docs = invoiceDocs();
+    const orig = docs.find(d => d.id === keyOf('99999', SUP, 'credit'));
+    log('no duplicate after edit-resume', docs.length === 1 && !!orig, docs.map(d => d.id).join(','));
+    log('edited doc preserved', orig && orig.amount === -130 && orig.invoiceNumber === '99999');
+    log('no false duplicate block', !window.__confirms.some(c => c.includes('כבר קיימת')));
+    // resume again with skip: doc1 skipped, doc2 opens fresh
+    await openItemFromInbox();
+    await waitSummary();
+    clickOkSummary();
+    window.__confirmScript = [{ match: 'כבר נשמר', answer: false }];
+    await waitDocForm(2, 4);
+    log('skip advanced to doc2 fresh form', document.getElementById('invoiceNumberInput').value === '22889946');
+    docs = invoiceDocs();
+    log('still one record after skip', docs.length === 1, docs.map(d => d.id).join(','));
+    log('inbox still pending', inboxDoc() && inboxDoc().status === 'pending');
+    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+  }
+
+  else if (scenario === 'regroup-partial') {
+    // pages: [22889733, unnumbered, 22890297, 23094043]; run 1: page2 continues doc1
+    await openItemFromInbox();
+    const ov = await waitSummary();
+    ov.querySelector('input[name="splitDec1"][value="continue"]').click();
+    await waitFor(() => document.querySelector('#splitSummaryTitle').textContent.includes('זוהו 3 מסמכים'), 'regroup 3');
+    clickOkSummary();
+    await waitDocForm(1, 3);
+    fillSupplierAndSave();
+    await waitSavedAlert(1);
+    const d1id = keyOf('22889733', SUP, 'credit');
+    log('pages 1-2 owned by doc1', inboxDoc().splitOwners && inboxDoc().splitOwners['1'] === d1id && inboxDoc().splitOwners['2'] === d1id);
+    await waitDocForm(2, 3);
+    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await sleep(300);
+    // run 2: change the decision - page2 is now "new document"; both page1 and page2 groups are owned
+    await openItemFromInbox();
+    await waitSummary();
+    document.querySelector('input[name="splitDec1"][value="new"]').click();
+    await waitFor(() => document.querySelector('#splitSummaryTitle').textContent.includes('זוהו 4 מסמכים'), 'regroup 4');
+    clickOkSummary();
+    window.__confirmScript = [{ match: 'כבר נשמר', answer: false }];   // skip owned docs
+    await waitFor(() => formVisible() && document.getElementById('invoiceNumberInput').value === '22890297', 'page3 fresh form');
+    log('regroup did not duplicate owned pages', invoiceDocs().length === 1);
+    log('two owned docs were skipped', window.__confirms.filter(c => c.includes('כבר נשמר')).length === 2);
     fillSupplierAndSave();
     await waitSavedAlert(2);
     const docs = invoiceDocs();
-    const orig = docs.find(d => d.id === keyOf('99999', SUP, 'credit'));
-    const resaved = docs.find(d => d.id === keyOf('22889733', SUP, 'credit'));
-    log('no silent overwrite: both docs exist', !!orig && !!resaved, docs.map(d => d.id).join(','));
-    log('edited doc preserved', orig && orig.amount === -130 && orig.invoiceNumber === '99999');
-    log('no false duplicate block', !window.__confirms.some(c => c.includes('כבר קיימת')));
-    log('inbox still pending', inboxDoc() && inboxDoc().status === 'pending');
+    log('page3 saved fresh', docs.length === 2 && docs.some(d => d.id === keyOf('22890297', SUP, 'credit')), docs.map(d => d.id).join(','));
+    log('edited doc untouched', docs.find(d => d.id === d1id) && docs.find(d => d.id === d1id).invoiceNumber === '22889733');
+    await waitDocForm(4, 4);
     [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    log('inbox still pending', inboxDoc() && inboxDoc().status === 'pending');
+  }
+
+  else if (scenario === 'reloadresume') {
+    const phase = new URLSearchParams(location.search).get('phase') || '1';
+    if (phase === '1') {
+      await openItemFromInbox();
+      await waitSummary();
+      clickOkSummary();
+      await waitDocForm(1, 4);
+      fillSupplierAndSave();
+      await waitSavedAlert(1);
+      await waitDocForm(2, 4);
+      [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+      await sleep(300);
+      log('saved before reload', invoiceDocs().length === 1);
+      const q = new URLSearchParams(location.search); q.set('phase', '2');
+      location.href = location.pathname + '?' + q.toString();   // real reload - ownership must survive
+      await new Promise(() => {});
+    } else {
+      await openItemFromInbox();
+      await waitSummary();
+      clickOkSummary();
+      window.__confirmScript = [{ match: 'כבר נשמר', answer: false }];
+      await waitDocForm(2, 4);
+      log('ownership survived reload (skip offered)', window.__confirms.some(c => c.includes('כבר נשמר')));
+      log('doc2 opens fresh after skip', document.getElementById('invoiceNumberInput').value === '22889946');
+      log('single record preserved across reload', invoiceDocs().length === 1);
+      [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    }
   }
 
   else if (scenario === 'shot-ambiguity') {

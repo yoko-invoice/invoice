@@ -74,6 +74,11 @@ window.fetch = async (url, opts) => {
     window.__recogCalls.push(idx);
     return new Response(JSON.stringify({ result: window.__canned[idx] }), { status: 200 });
   }
+  if (u.includes('invoiceinboxfile')) {
+    const u8 = new Uint8Array(pdfResp.slice(0));
+    let bin = ''; for (let i = 0; i < u8.length; i += 8192) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+    return new Response(JSON.stringify({ data: btoa(bin), filename: 'sample.pdf', mime: 'application/pdf' }), { status: 200 });
+  }
   if (u.startsWith('fake-download://')) return new Response(pdfResp.slice(0), { status: 200 });
   return realFetch(url, opts);
 };
@@ -117,7 +122,8 @@ for (let i = 1; i <= pdf.numPages; i++) {
 
 // seed the pending queue item + its stored original
 if (!__store.has('yoko_inbox/' + INBOX_ID)) __seed('yoko_inbox/' + INBOX_ID, {
-  status: 'pending', source: 'device', originalPath: ORIGINAL_PATH,
+  status: 'pending', source: scenario === 'emailsplit' ? 'email' : 'device',
+  ...(scenario === 'emailsplit' ? {} : { originalPath: ORIGINAL_PATH }),
   filename: 'sample.pdf', mime: 'application/pdf', mailDate: new Date().toISOString(), fields: {}, printStatus: 'needed'
 });
 if (scenario === 'dupblock' && !__store.has('yoko_invoices/existing_dup')) {
@@ -182,6 +188,30 @@ try {
     log('stable full-identity ids', NUMS.every((n, i) => docs.some(d => d.id === keyOf(n, SUP, i < 3 ? 'credit' : 'invoice'))));
     log('credit signs', docs.filter(d => d.amount < 0).length === 3);
     log('single recognition round', window.__recogCalls.length === 4);
+  }
+
+  else if (scenario === 'emailsplit') {
+    // פריט מקור מהמייל (בלי originalPath): אותן הבטחות פיצול כמו פריט מכשיר -
+    // בעלות-עמודים נכתבת אחרי כל שמירה, מזהים יציבים, והפריט נסגר כשכל העמודים נשמרו
+    await openItemFromInbox();
+    const ov = await waitSummary();
+    log('summary title 4 docs', ov.textContent.includes('זוהו 4 מסמכים נפרדים בקובץ'));
+    clickOkSummary();
+    for (let k = 1; k <= 4; k++) {
+      await waitDocForm(k, 4);
+      fillSupplierAndSave();
+      await waitSavedAlert(k);
+      if (k < 4) {
+        log('inbox still pending after doc' + k, inboxDoc() && inboxDoc().status === 'pending');
+        log('ownership written after doc' + k, !!(inboxDoc().splitOwners && inboxDoc().splitOwners[String(k)] === keyOf(NUMS[k - 1], SUP, k < 4 ? 'credit' : 'invoice')));
+      }
+    }
+    await waitFor(() => inboxDoc() && inboxDoc().status === 'approved', 'inbox approved');
+    log('inbox approved when complete', true);
+    const docs = invoiceDocs();
+    log('4 invoice docs', docs.length === 4, docs.map(d => d.id).join(','));
+    log('stable full-identity ids', NUMS.every((n, i) => docs.some(d => d.id === keyOf(n, SUP, i < 3 ? 'credit' : 'invoice'))));
+    log('ownership covers all 4 pages', [1, 2, 3, 4].every(p => inboxDoc().splitOwners && inboxDoc().splitOwners[String(p)]));
   }
 
   else if (scenario === 'ambiguity') {

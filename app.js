@@ -2822,7 +2822,10 @@
             }
             const subPages = g.pageIdxs.map(i => st.pages[i]);
             const subResults = g.pageIdxs.map(i => st.results[i]);
-            const parsed = mergePageResults(subResults);
+            // במסמך מעורב (חלק מהעמודים כבר נשמרו): הזהות, הסכומים והפריטים נגזרים רק מהעמודים שטרם נשמרו -
+            // אחרת נתונים כספיים של עמוד שמור היו נספרים פעמיים בשתי רשומות
+            const keepJ = g.pageIdxs.map((p, j) => owners[String(p + 1)] ? -1 : j).filter(j => j >= 0);
+            const parsed = mergePageResults((keepJ.length ? keepJ : g.pageIdxs.map((_, j) => j)).map(j => subResults[j]));
             if (parsed.isCredit && parsed.amount > 0) parsed.amount = -Math.abs(parsed.amount);
             const meta = reconcileHeader(parsed, null);
             meta.handwritingField = Array.isArray(parsed.handwrittenNotes);

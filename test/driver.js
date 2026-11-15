@@ -503,6 +503,8 @@ try {
     const d3 = invoiceDocs().find(d => d.id === keyOf('22890297', SUP, 'credit'));
     window.__step = 'mix4';
     log('only unsaved page saved', d3 && d3.pageCount === 1, d3 && String(d3.pageCount));
+    log('items only from unsaved page', d3 && d3.items.length === 1 && d3.items[0].name === 'item3', d3 && JSON.stringify(d3.items));
+    log('amount from unsaved page only', d3 && d3.amount === -115, d3 && String(d3.amount));
     window.__step = 'mix5';
     log('page 2 still owned by doc1', inboxDoc().splitOwners['2'] === keyOf('22889733', SUP, 'credit'));
     window.__step = 'mix6';

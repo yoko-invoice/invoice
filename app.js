@@ -317,6 +317,7 @@
         let recognizedPageCount = 1;
         let editingOriginalKind = null;      // 'invoice' | 'delivery' - הסוג של המסמך הקיים בזמן עריכה (לזיהוי המרה)
         let currentScanPages = [];           // עמודי הסריקה הנוכחית (base64) - לצורך הוספת עמודים
+        let splitScanState = null;           // {groups, pages, results, idx} - פיצול קובץ שיש בו כמה מסמכים עם מספרים שונים
         let currentScanResults = [];         // תוצאות זיהוי לכל עמוד
         let selectedScanPages = [];          // לכל עמוד בסריקה: true = לשמור ולהעלות, false = לדלג (ברירת מחדל: הכול מסומן)
         let currentScanThumbs = [];          // תמונות ממוזערות לבורר העמודים
@@ -1675,9 +1676,11 @@
                     try { await updatePriceBook(supplier, items, noteDate, 'delivery_note'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
 
-                try { markInboxDone(noteNumber, amount); } catch (e) {}
+                const moreSplitDocs = splitScanState && (splitScanState.idx + 1 < splitScanState.groups.length);
+                // בפיצול, פריט ההמתנה נסגר רק אחרי שהמסמך האחרון בסדרה נשמר - לא באמצע
+                if (!moreSplitDocs) { try { markInboxDone(noteNumber, amount); } catch (e) {} }
                 document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
-                reopenInboxIfNeeded();
+                if (!moreSplitDocs) { reopenInboxIfNeeded(); splitScanState = null; }
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
@@ -1686,13 +1689,15 @@
                 pendingNewDocId = null;
                 scanMode = 'invoice';
                 if (!isUpdate) learnDateChoice(supplier, noteDate, scanMetaAtSave);
-                alert(isUpdate ? ((editingOriginalKind === 'invoice' || editingOriginalKind === 'income') ? "המסמך הומר לתעודת משלוח בהצלחה!" : "התעודה עודכנה בהצלחה!") : "התעודה נשמרה בהצלחה!");
+                alert((isUpdate ? ((editingOriginalKind === 'invoice' || editingOriginalKind === 'income') ? "המסמך הומר לתעודת משלוח בהצלחה!" : "התעודה עודכנה בהצלחה!") : "התעודה נשמרה בהצלחה!") + (moreSplitDocs ? '\nממשיכים למסמך ' + (splitScanState.idx + 2) + ' מתוך ' + splitScanState.groups.length + '.' : ''));
                 if (monthKey !== selectedMonth) {
                     const monthEl = document.getElementById('invoiceMonthSelect');
                     if (monthEl) monthEl.value = monthKey;
                     customReportEdits = {};
                 }
                 loadInvoicesForMonth();
+                if (moreSplitDocs) { splitScanState.idx++; await presentSplitDocument(); }
+                return true;
             } catch (e) {
                 alert("שגיאה בשמירת התעודה: " + (e && e.message ? e.message : "שגיאה לא ידועה") + "\nניתן לנסות שוב.");
             } finally {
@@ -2530,6 +2535,119 @@
             return merged;
         }
 
+        // ---- פיצול קובץ רב-מסמכי ----
+        // הזיהוי כבר קורא כל עמוד בנפרד, ולכן הקיבוץ למסמכים לא דורש קריאות זיהוי נוספות.
+        // זהות מסמך = מספר + ספק + סוג מסמך. מספר זהה עם ספק או סוג שונה אינו מתמזג.
+        function splitPageNumber(r) { return String(r && r.invoiceNumber || '').replace(/\D/g, ''); }
+        function splitPageSupplier(r) { return String(r && r.supplier || '').trim(); }
+        function splitPageKind(r) {
+            if (!r) return '';
+            if (r.isCredit) return 'credit';
+            const t = String(r.docType || r.documentType || '').toLowerCase();
+            if (/deliver|תעוד|משלוח/.test(t)) return 'delivery';
+            if (/invoice|חשבונ|זיכוי|credit|tax/.test(t)) return 'invoice';
+            return '';
+        }
+        // מחזיר true/false כשאפשר להכריע אם שתי תוצאות הן אותו מסמך, null כשחסר מידע
+        function sameSplitDoc(a, b) {
+            const nA = splitPageNumber(a), nB = splitPageNumber(b);
+            if (!nA || !nB) return null;
+            if (nA !== nB) return false;
+            const sA = splitPageSupplier(a), sB = splitPageSupplier(b);
+            if (sA && sB && sA !== sB) return false;
+            const kA = splitPageKind(a), kB = splitPageKind(b);
+            if (kA && kB && kA !== kB) return false;
+            return true;
+        }
+        // עמוד בלי מספר קריא מצורף למסמך שקדם לו, אבל השיוך מסומן ומוצג למשתמש בסיכום
+        // הפיצול לאישור - לא מוחלט בשקט. מסמך חדש נפתח רק על מספר שונה (או ספק/סוג שונה).
+        function groupScanPages(results) {
+            const groups = [];
+            results.forEach((r, i) => {
+                const num = splitPageNumber(r);
+                if (!groups.length) {
+                    groups.push({ pageIdxs: [i], ref: num ? r : null, hasUnnumbered: !num });
+                    return;
+                }
+                const cur = groups[groups.length - 1];
+                if (!num) { cur.pageIdxs.push(i); cur.hasUnnumbered = true; return; }
+                if (!cur.ref) { cur.ref = r; cur.pageIdxs.push(i); return; }
+                if (sameSplitDoc(cur.ref, r) === true) { cur.pageIdxs.push(i); return; }
+                groups.push({ pageIdxs: [i], ref: r, hasUnnumbered: false });
+            });
+            return groups;
+        }
+
+        function splitGroupLabel(g, results) {
+            const merged = mergePageResults(g.pageIdxs.map(i => results[i]));
+            const k = splitPageKind(merged) || splitPageKind(g.ref);
+            const kind = k === 'credit' ? 'חשבונית זיכוי' : (k === 'delivery' ? 'תעודת משלוח' : 'חשבונית');
+            const num = String(merged.invoiceNumber || '').trim();
+            const sup = splitPageSupplier(merged);
+            let amt = '';
+            if (typeof merged.amount === 'number') {
+                const a = (merged.isCredit && merged.amount > 0) ? -Math.abs(merged.amount) : merged.amount;
+                amt = ', ' + a + ' ₪';
+            }
+            return kind + (num ? ' מספר ' + num : '') + (sup ? ', ' + sup : '') + amt;
+        }
+
+        // סיכום הפיצול לאישור לפני פתיחת מסכי האישור הנפרדים. ביטול = מילוי ידני, בלי מיזוג שקט.
+        function showSplitSummary(groups, results) {
+            return new Promise((resolve) => {
+                const overlay = document.createElement('div');
+                overlay.id = 'splitSummaryOverlay';
+                overlay.style.cssText = 'position:fixed; inset:0; z-index:1100; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:12px;';
+                const rows = groups.map((g, gi) => {
+                    const pagesTxt = g.pageIdxs.map(i => i + 1).join(', ');
+                    const warn = g.hasUnnumbered
+                        ? '<div style="font-size:0.75em; color:#b9770e;">⚠️ עמוד ללא מספר קריא שויך כהמשך. אם השיוך לא נכון - בטל וסרוק כל מסמך בנפרד.</div>'
+                        : '';
+                    return '<div style="border:1px solid #ddd; border-radius:8px; padding:6px 8px; margin-bottom:6px; background:#fff;">'
+                        + '<b>' + (gi + 1) + '. ' + esc(splitGroupLabel(g, results)) + '</b>'
+                        + '<div style="font-size:0.8em; color:#555;">עמודים: ' + pagesTxt + '</div>' + warn + '</div>';
+                }).join('');
+                overlay.innerHTML = '<div style="background:#fff; width:100%; max-width:520px; max-height:85vh; overflow-y:auto; border-radius:12px; padding:14px; direction:rtl;">'
+                    + '<div style="font-weight:700; margin-bottom:6px;">זוהו ' + groups.length + ' מסמכים נפרדים בקובץ</div>'
+                    + '<div style="font-size:0.85em; color:#555; margin-bottom:8px;">כל מסמך ייפתח לאישור ושמירה בנפרד. הקובץ בתור ההמתנה לא ייסגר לפני שכל המסמכים טופלו.</div>'
+                    + rows
+                    + '<div style="display:flex; gap:8px; margin-top:10px;">'
+                    + '<button id="splitSummaryOk" style="flex:1; background:#27ae60; color:#fff; border:none; border-radius:8px; padding:10px;">המשך לאישור המסמכים</button>'
+                    + '<button id="splitSummaryCancel" style="flex:1; background:#e74c3c; color:#fff; border:none; border-radius:8px; padding:10px;">ביטול</button>'
+                    + '</div></div>';
+                document.body.appendChild(overlay);
+                const done = (val) => { overlay.remove(); resolve(val); };
+                overlay.querySelector('#splitSummaryOk').onclick = () => done(true);
+                overlay.querySelector('#splitSummaryCancel').onclick = () => done(false);
+            });
+        }
+
+        // פותח את מסך האישור של המסמך הנוכחי בסדרת הפיצול (בלי קריאות זיהוי חדשות - משתמש בתוצאות הקיימות)
+        async function presentSplitDocument() {
+            const st = splitScanState;
+            if (!st) return;
+            const g = st.groups[st.idx];
+            const subPages = g.pageIdxs.map(i => st.pages[i]);
+            const subResults = g.pageIdxs.map(i => st.results[i]);
+            const parsed = mergePageResults(subResults);
+            if (parsed.isCredit && parsed.amount > 0) parsed.amount = -Math.abs(parsed.amount);
+            const meta = reconcileHeader(parsed, null);
+            meta.handwritingField = Array.isArray(parsed.handwrittenNotes);
+            currentScanMeta = meta;
+            currentScanPages = subPages.slice();
+            currentScanResults = subResults.slice();
+            recognizedPageCount = subPages.length;
+            recognizedImageBase64 = await buildScanPreview(subPages);
+            await initPageSelection(subPages);
+            lastAutoAmount = (typeof parsed.amount === 'number') ? parsed.amount : null;
+            const det = detectDocType(parsed);
+            scanMode = det.type;
+            autoDetectedDocType = det;
+            openInvoiceConfirmForm(parsed, null, itemsMismatchTotal(parsed));
+            const formTitle = document.getElementById('confirmFormTitle');
+            if (formTitle && st.groups.length > 1) formTitle.innerText += ' (מסמך ' + (st.idx + 1) + ' מתוך ' + st.groups.length + ')';
+        }
+
         // Keep exact scan-page geometry alongside its generated image until upload completes.
         const scanPrintLayouts = new Map();
         function rememberPrintLayout(image, layout) {
@@ -2574,6 +2692,7 @@
                 return;
             }
             if (!pages || pages.length === 0) return;
+            splitScanState = null;
 
             const recognizingEl = document.getElementById('invoiceRecognizing');
             const confirmForm = document.getElementById('invoiceConfirmForm');
@@ -2614,6 +2733,18 @@
                 };
                 await Promise.all(Array.from({ length: Math.min(3, pages.length) }, worker));
 
+                // פיצול: מספרי מסמך שונים בין העמודים = מסמכים נפרדים, כל אחד מאושר ונשמר בנפרד
+                const splitGroups = (pages.length > 1) ? groupScanPages(results) : null;
+                if (splitGroups && splitGroups.length > 1) {
+                    try { await hdrPromise; } catch (e) {}   // במצב פיצול לא משתמשים בקריאת הכותרת הנפרדת
+                    if (await showSplitSummary(splitGroups, results)) {
+                        splitScanState = { groups: splitGroups, pages: pages.slice(), results: results.slice(), idx: 0 };
+                        await presentSplitDocument();
+                    } else {
+                        openInvoiceConfirmForm(null, null);   // ביטול הפיצול - מילוי ידני בלבד
+                    }
+                    return;
+                }
                 const parsed = (pages.length === 1) ? results[0] : mergePageResults(results);
                 if (parsed.isCredit && parsed.amount > 0) {
                     parsed.amount = -Math.abs(parsed.amount);
@@ -2970,7 +3101,10 @@
         }
 
         function openInvoiceConfirmForm(recognized, existingInvoice = null, itemsMismatch = false) {
-            pendingNewDocId = pendingInboxItem && pendingInboxItem.originalPath ? pendingInboxItem.id : null;   // Stable ID prevents retry duplicates
+            // מזהה יציב לכל מסמך בנפרד (גם בפיצול) - ניסיון שמירה חוזר דורס את אותו מסמך ולא יוצר כפילות
+            pendingNewDocId = pendingInboxItem && pendingInboxItem.originalPath
+                ? (splitScanState ? pendingInboxItem.id + '__doc' + (splitScanState.idx + 1) : pendingInboxItem.id)
+                : null;
             const confirmForm = document.getElementById('invoiceConfirmForm');
             const imgWrap = document.getElementById('invoicePreviewImgWrap');
             const formTitle = document.getElementById('confirmFormTitle');
@@ -3163,13 +3297,16 @@
         window.saveAndPrintInvoice = async function() {
             const pages = selectedPagesList();
             if (!pages.length) { alert("אין עמוד מסומן להדפסה. השתמש ב'שמור חשבונית'."); return; }
-            await window.saveInvoiceEntry();
-            const form = document.getElementById('invoiceConfirmForm');
-            // הטופס נסגר = השמירה הצליחה; אם נשאר פתוח (חסר ספק/סכום וכו') לא מדפיסים
-            if (form && form.classList.contains('hidden')) await printPagesBase64(pages);
+            // שמירה מוצלחת מחזירה true; בפיצול הטופס נפתח מחדש למסמך הבא ולכן לא מסתמכים על מצב הטופס
+            const saved = await window.saveInvoiceEntry();
+            if (saved) await printPagesBase64(pages);
         };
 
         window.cancelInvoiceEntry = function() {
+            if (splitScanState) {
+                splitScanState = null;
+                showToast('הפיצול הופסק - הקובץ נשאר בתור ההמתנה ולא נסגר; המסמכים שעוד לא נשמרו מחכים לטיפול.', 'err');
+            }
             document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
             editCropInvoice = null;
             recognizedImageBase64 = null;
@@ -3297,10 +3434,15 @@
                 if (!isIncome && !isUpdate && amount > 0) {
                     try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
-                try { markInboxDone(invoiceNumber, amount); } catch (e) {}
-                pendingInboxItem = null;   // גם אם הפריט לא סומן כטופל, הוא לא יסמן חשבונית עתידית בטעות
+                const moreSplitDocs = splitScanState && (splitScanState.idx + 1 < splitScanState.groups.length);
+                // בפיצול, פריט ההמתנה נסגר רק אחרי שהמסמך האחרון בסדרה נשמר - לא באמצע
+                if (!moreSplitDocs) {
+                    try { markInboxDone(invoiceNumber, amount); } catch (e) {}
+                    pendingInboxItem = null;   // גם אם הפריט לא סומן כטופל, הוא לא יסמן חשבונית עתידית בטעות
+                    splitScanState = null;
+                }
                 document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
-                reopenInboxIfNeeded();
+                if (!moreSplitDocs) reopenInboxIfNeeded();
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
                 handwrittenNotesList = [];
@@ -3315,7 +3457,7 @@
                 else if (editingOriginalKind === 'income' && savedKind !== 'income') saveMsg = "חשבונית ההכנסה הומרה לחשבונית ספק בהצלחה!";
                 else if (editingOriginalKind !== 'income' && savedKind === 'income') saveMsg = "החשבונית הועברה לרשימת ההכנסות בהצלחה!";
                 else saveMsg = isIncome ? "חשבונית ההכנסה עודכנה בהצלחה!" : "החשבונית עודכנה בהצלחה!";
-                alert(saveMsg);
+                alert(saveMsg + (moreSplitDocs ? '\nממשיכים למסמך ' + (splitScanState.idx + 2) + ' מתוך ' + splitScanState.groups.length + '.' : ''));
                 scanMode = 'invoice';
                 if (monthKey !== selectedMonth) {
                     const monthEl = document.getElementById('invoiceMonthSelect');
@@ -3323,6 +3465,8 @@
                     customReportEdits = {};
                 }
                 loadInvoicesForMonth();
+                if (moreSplitDocs) { splitScanState.idx++; await presentSplitDocument(); }
+                return true;
             } catch(e) {
                 alert("שגיאה בשמירת החשבונית: " + (e && e.message ? e.message : "שגיאה לא ידועה") + "\nניתן לנסות שוב.");
             } finally {

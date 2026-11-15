@@ -320,6 +320,7 @@
         let splitScanState = null;           // {groups, pages, results, idx} - פיצול קובץ שיש בו כמה מסמכים עם מספרים שונים
         let currentScanResults = [];         // תוצאות זיהוי לכל עמוד
         let selectedScanPages = [];          // לכל עמוד בסריקה: true = לשמור ולהעלות, false = לדלג (ברירת מחדל: הכול מסומן)
+        let lockedScanPages = [];            // עמוד שכבר נשמר ברשומה קיימת: נעול לבחירה, אין העברת בעלות בלי כוונה
         let currentScanThumbs = [];          // תמונות ממוזערות לבורר העמודים
         let previewBuildToken = 0;           // מונע מבנייה ישנה של התצוגה לדרוס בנייה חדשה
         let scanPreviewPromise = Promise.resolve();   // השמירה ממתינה לו כדי שהתמונה תתאים לעמודים שסומנו
@@ -2097,6 +2098,7 @@
 
         async function initPageSelection(pages) {
             selectedScanPages = pages.map(() => true);
+            lockedScanPages = pages.map(() => false);
             currentScanThumbs = await Promise.all(pages.map(makeThumb));
         }
 
@@ -2134,9 +2136,10 @@
             const selCount = selectedPagesList().length;
             const cells = currentScanThumbs.map((t, i) => {
                 const on = selectedScanPages[i] !== false;
-                return `<label style="flex:0 0 auto; width:78px; text-align:center; font-weight:normal; margin:0; cursor:pointer; border:2px solid ${on ? '#1877f2' : '#ccd0d5'}; border-radius:8px; padding:3px; background:#fff; opacity:${on ? 1 : 0.45};">
+                const locked = lockedScanPages[i] === true;
+                return `<label style="flex:0 0 auto; width:78px; text-align:center; font-weight:normal; margin:0; cursor:${locked ? 'not-allowed' : 'pointer'}; border:2px solid ${on ? '#1877f2' : '#ccd0d5'}; border-radius:8px; padding:3px; background:#fff; opacity:${on ? 1 : 0.45};">
                     <img src="${t}" style="width:100%; height:96px; object-fit:contain; background:#eee; display:block; border-radius:4px;">
-                    <span style="display:flex; align-items:center; justify-content:center; gap:4px; font-size:0.8em; margin-top:3px;"><input type="checkbox" style="width:auto; margin:0;" ${on ? 'checked' : ''} onchange="togglePageSelection(${i}, this.checked)"> עמוד ${i + 1}</span>
+                    <span style="display:flex; align-items:center; justify-content:center; gap:4px; font-size:0.8em; margin-top:3px;"><input type="checkbox" style="width:auto; margin:0;" ${on ? 'checked' : ''} ${locked ? 'disabled' : ''} onchange="togglePageSelection(${i}, this.checked)"> עמוד ${i + 1}${locked ? ' (כבר נשמר)' : ''}</span>
                 </label>`;
             }).join('');
             box.innerHTML = `<div style="font-size:0.8em; font-weight:600; margin-bottom:4px;">עמודים לשמירה (${selCount} מתוך ${currentScanPages.length}):</div>
@@ -2146,6 +2149,7 @@
         }
 
         window.togglePageSelection = function(i, checked) {
+            if (lockedScanPages[i]) return;   // עמוד שכבר נשמר ברשומה קיימת נעול - אין העברת בעלות או שכפול תוכן
             selectedScanPages[i] = Boolean(checked);
             renderPageSelector();
             scanPreviewPromise = rebuildScanPreview();
@@ -2183,6 +2187,7 @@
                 currentScanResults = allResults;
                 // עמודים חדשים מסומנים כברירת מחדל; סימונים קיימים נשמרים
                 selectedScanPages = selectedScanPages.concat(newPages.map(() => true));
+                lockedScanPages = lockedScanPages.concat(newPages.map(() => false));
                 currentScanThumbs = currentScanThumbs.concat(await Promise.all(newPages.map(makeThumb)));
                 scanPreviewPromise = rebuildScanPreview();
                 await scanPreviewPromise;
@@ -2839,7 +2844,7 @@
             await initPageSelection(subPages);
             const ownedSel = g.pageIdxs.map((p, j) => owners[String(p + 1)] ? j : -1).filter(j => j >= 0);
             if (ownedSel.length) {
-                ownedSel.forEach(j => { selectedScanPages[j] = false; });
+                ownedSel.forEach(j => { selectedScanPages[j] = false; lockedScanPages[j] = true; });
                 scanPreviewPromise = rebuildScanPreview();
                 await scanPreviewPromise;
                 showToast('עמודים שכבר נשמרו הוסרו מהבחירה - יישמרו רק העמודים שטרם נשמרו.');

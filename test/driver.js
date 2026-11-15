@@ -498,6 +498,10 @@ try {
     const boxes = [...document.querySelectorAll('#pageSelectorBox input[type=checkbox]')];
     window.__step = 'mix3';
     log('owned page unchecked, unsaved kept', boxes.length === 2 && !boxes[0].checked && boxes[1].checked, boxes.map(b => b.checked).join(','));
+    log('owned page locked with label', boxes[0].disabled && document.getElementById('pageSelectorBox').textContent.includes('כבר נשמר') && !boxes[1].disabled);
+    window.togglePageSelection(0, true);   // try to re-select the owned page - must refuse
+    const boxes2 = [...document.querySelectorAll('#pageSelectorBox input[type=checkbox]')];
+    log('locked page cannot be reselected', !boxes2[0].checked);
     fillSupplierAndSave();
     await waitSavedAlert(2);
     const d3 = invoiceDocs().find(d => d.id === keyOf('22890297', SUP, 'credit'));

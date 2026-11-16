@@ -1,9 +1,9 @@
-const CACHE = 'invoices-v31';
+const CACHE = 'invoices-v36-v9-controlled-20261116';
 
 // קבצי האפליקציה (חובה לעבודה אופליין)
 const CORE = [
   './', 'index.html', 'styles.css',
-  'ui.js', 'app.js', 'register-sw.js', 'image-viewer.js', 'fold-cards.js',
+  'server-candidate/learning.js', 'ui.js', 'app.js', 'register-sw.js', 'image-viewer.js', 'fold-cards.js',
   'manifest.json', 'icon-192.png', 'icon-512.png'
 ];
 

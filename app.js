@@ -1,5 +1,5 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc, getDoc, getDocs, deleteDoc, deleteField, onSnapshot, query, where, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc, getDoc, getDocs, deleteDoc, deleteField, onSnapshot, query, where, writeBatch, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
         import { getAuth, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
         import { getStorage, ref as storageRef, uploadString, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
@@ -293,6 +293,60 @@
         ];
 
         let suppliersList = DEFAULT_SUPPLIERS.slice();
+        let customersList = [];
+        let customersReady = Promise.resolve();
+        let customersAvailable = false;
+        const cleanCustomerNames = names => [...new Set((Array.isArray(names) ? names : [])
+            .filter(n => typeof n === 'string').map(n => n.trim()).filter(n => n && n !== '-'))];
+        async function initialiseCustomers() {
+            const ref = getSettingsDoc('customers_list');
+            const existing = await getDoc(ref);
+            let seed = [];
+            if (!existing.exists()) {
+                const incomes = await getDocs(query(getInvoicesCollection(), where('docType', '==', 'income')));
+                seed = cleanCustomerNames(incomes.docs.map(d => incomeCustomerName(d.data())));
+            }
+            const names = await runTransaction(db, async tx => {
+                const snap = await tx.get(ref);
+                if (snap.exists()) {
+                    if (!Array.isArray(snap.data().customers)) throw new Error('רשימת הלקוחות אינה תקינה');
+                    return cleanCustomerNames(snap.data().customers);
+                }
+                tx.set(ref, { customers: seed });
+                return seed;
+            });
+            customersList = names;
+            customersAvailable = true;
+            renderSupplierSelect(); renderCustomerManageList();
+        }
+        async function persistNewCustomer(name) {
+            await customersReady;
+            if (!customersAvailable) throw new Error('רשימת הלקוחות לא נטענה. לא בוצע שינוי ברשימת הספקים.');
+            const ref = getSettingsDoc('customers_list');
+            const names = await runTransaction(db, async tx => {
+                const snap = await tx.get(ref);
+                const current = snap.exists() ? snap.data().customers : customersList;
+                if (!Array.isArray(current)) throw new Error('רשימת הלקוחות אינה תקינה');
+                const updated = cleanCustomerNames([...current, name]);
+                tx.set(ref, { customers: updated }, { merge: true });
+                return updated;
+            });
+            customersList = names;
+            renderSupplierSelect(); renderCustomerManageList();
+        }
+        window.addCustomerToList = async function() {
+            const input = document.getElementById('newCustomerNameInput');
+            const name = input.value.trim();
+            if (!name) return;
+            try { await persistNewCustomer(name); input.value = ''; }
+            catch (e) { alert('שמירת הלקוח נכשלה: ' + e.message); }
+        };
+        function renderCustomerManageList() {
+            const box = document.getElementById('customerListManage');
+            if (box) box.innerHTML = customersAvailable
+                ? (customersList.length ? customersList.map(n => '<div class="supplier-manage-item">' + esc(n) + '</div>').join('') : 'אין לקוחות ברשימה. אפשר להוסיף לקוח חדש.')
+                : 'רשימת הלקוחות עדיין לא נטענה.';
+        }
         let monthlyInvoices = [];
         let monthlyIncome = [];            // חשבוניות הכנסה של החודש הנבחר - נשמרות בנפרד, לא נכנסות לדוח הספקים/גרפים
         let recognizedImageBase64 = null;
@@ -1060,6 +1114,24 @@
             const supplierSelectEl = document.getElementById('invoiceSupplierSelect');
             if (supplierSelectEl) supplierSelectEl.addEventListener('change', () => refreshPriceAlerts(false));
 
+            customersReady = initialiseCustomers().catch(e => {
+                customersAvailable = false;
+                renderCustomerManageList();
+                showToast('⚠️ לא ניתן לטעון את רשימת הלקוחות: ' + e.message, 'err');
+            });
+            onSnapshot(getSettingsDoc('customers_list'), snap => {
+                if (!snap.exists() || !Array.isArray(snap.data().customers)) return;
+                customersList = cleanCustomerNames(snap.data().customers);
+                customersAvailable = true;
+                renderSupplierSelect(); renderCustomerManageList();
+            }, () => {});
+            const incomePayment = document.getElementById('invoicePaymentMethodInput');
+            if (incomePayment) incomePayment.addEventListener('change', () => {
+                if (incomePayment.value.trim() === 'הכנסה' && scanMode !== 'income') {
+                    document.getElementById('docTypeSelect').value = 'income';
+                    window.onDocTypeChange();
+                }
+            });
             startInboxListener();
             onSnapshot(getSettingsDoc("suppliers_list"), (snap) => {
                 if (snap.exists() && Array.isArray(snap.data().suppliers)) {
@@ -1154,24 +1226,77 @@
             return { supplier: hits[0] || '', conflict: false };
         }
 
-        // לומד כינוי חדש כשבחרת ספק ידנית - בפעם הבאה הזיהוי יהיה אוטומטי
-        async function learnSupplierAlias(chosenSupplier) {
+        let initialSupplierSelection = '';
+        let initialDateSelection = '';
+        let initialTypeSelection = '';
+        let confirmedIssuerCandidates = [];
+        let correctionRawSnapshot = null;
+        // Only changed, confirmed, successfully persisted supplier corrections may teach a future match.
+        async function learnSupplierAlias(chosenSupplier, feedback) {
+            if (!chosenSupplier || !feedback || !feedback.confirmed || feedback.role === 'income' || navigator.onLine === false) return;
             try {
-                if (!chosenSupplier) return;
-                const n = normSupplierName(lastRecognizedSupplierRaw);
-                const tax = String(lastRecognizedTaxId || '').replace(/\D/g, '');
-                let changed = false;
-                if (n && n !== normSupplierName(chosenSupplier) && supplierAliases.names[n] !== chosenSupplier) {
-                    supplierAliases.names[n] = chosenSupplier; changed = true;
+                const n = normSupplierName(feedback.rawName);
+                const tax = feedback.taxConfirmed ? String(feedback.rawTax || '').replace(/\D/g, '') : '';
+                if (!n && tax.length < 8) return;
+                const ref = getSettingsDoc('supplier_aliases');
+                const outcome = await runTransaction(db, async tx => {
+                    const snap = await tx.get(ref);
+                    const old = snap.exists() ? snap.data() : {};
+                    const aliases = { ...old, names: { ...(old.names || {}) }, taxIds: { ...(old.taxIds || {}) } };
+                    if ((n && aliases.names[n] && aliases.names[n] !== chosenSupplier) ||
+                        (tax && aliases.taxIds[tax] && aliases.taxIds[tax] !== chosenSupplier)) return { conflict: true };
+                    let changed = false;
+                    if (n && n !== normSupplierName(chosenSupplier) && aliases.names[n] !== chosenSupplier) {
+                        aliases.names[n] = chosenSupplier; changed = true;
+                    }
+                    if (tax.length >= 8 && aliases.taxIds[tax] !== chosenSupplier) {
+                        aliases.taxIds[tax] = chosenSupplier; changed = true;
+                    }
+                    if (changed) tx.set(ref, aliases);
+                    return { aliases };
+                });
+                if (outcome.conflict) showToast('⚠️ תיקון הספק מתנגש בהתאמה קודמת. החשבונית נשמרה, אך ההתאמה הקודמת לא שונתה.', 'err');
+                else supplierAliases = outcome.aliases;
+            } catch (e) {
+                console.warn('שמירת התאמת ספק נכשלה:', e);
+                showToast('⚠️ החשבונית נשמרה, אך לא ניתן לשמור את התיקון לזיהוי הבא.', 'err');
+            } finally {
+                // Do not erase context if another document opened during the write.
+                if (lastRecognizedSupplierRaw === feedback.rawName && lastRecognizedTaxId === feedback.rawTax) {
+                    lastRecognizedSupplierRaw = ''; lastRecognizedTaxId = '';
                 }
-                if (tax.length >= 8 && supplierAliases.taxIds[tax] !== chosenSupplier) {
-                    supplierAliases.taxIds[tax] = chosenSupplier; changed = true;
-                }
-                if (changed) await ackOrQueue(setDoc(getSettingsDoc("supplier_aliases"), supplierAliases), 8000, "כינוי ספק");
-            } catch (e) { console.warn("שמירת כינוי ספק נכשלה:", e); }
-            lastRecognizedSupplierRaw = '';
-            lastRecognizedTaxId = '';
+            }
         }
+
+        async function learnCorrectionExample(raw, final, role, sourceId) {
+            if(!raw || navigator.onLine===false || !globalThis.InvoiceLearning)return;
+            const base=raw._learningOriginal || raw;
+            const e=InvoiceLearning.example({raw:base,final,role,restaurant:RESTAURANT_ID,sourceId,confirmed:true});
+            if(!e)return;
+            e.sourceDisplay={number:document.getElementById('invoiceNumberInput').value.trim(),date:final.invoiceDate||document.getElementById('invoiceDateInput').value,kind:role==='delivery'?'תעודת משלוח':(Number(document.getElementById('invoiceAmountInput').value)<0?'חשבונית זיכוי':'חשבונית'),source:pendingInboxItem?.source==='email'?'דואר אלקטרוני':'העלאה או צילום'};
+            try {
+                await runTransaction(db,async tx=>{
+                    const ref=getSettingsDoc('recognition_examples');const snap=await tx.get(ref);
+                    const entries=[...(snap.exists()&&snap.data().entries||[])];
+                    const next=entries.filter(x=>x.id!==e.id);next.push(e);
+                    tx.set(ref,{version:1,entries:next.slice(-50)});
+                });
+            } catch(err) {showToast('⚠️ המסמך נשמר, אך דוגמת התיקון לא נשמרה ללמידה.','err');}
+        }
+        window.manageRecognitionExamples=async function() {
+            const snap=await getDoc(getSettingsDoc('recognition_examples'));const entries=snap.exists()?snap.data().entries||[]:[];
+            const box=document.createElement('div');box.style.cssText='position:fixed;inset:5%;background:white;z-index:20000;overflow:auto;padding:16px;border:2px solid #777;border-radius:12px;';
+            const h=document.createElement('h3');h.textContent='תיקונים שנשמרו לזיהוי';box.append(h);
+            const close=document.createElement('button');close.textContent='סגור';close.onclick=()=>box.remove();box.append(close);
+            for(const e of entries.filter(e=>!e.disabled)) {
+                const row=document.createElement('p');row.style.cssText='white-space:pre-line;overflow-wrap:anywhere;line-height:1.6;';row.textContent=(e.scope?.title||'')+' | מזהי מנפיק: '+(e.scope?.issuer||[]).join(', ')+'\n'+(e.corrections||[]).map(c=>(c.field==='invoiceDate'?'תאריך':'סוג מסמך')+': נקרא '+(isValidIsoDate(c.before)?fmtIsoDate(c.before):({invoice:'חשבונית',delivery_note:'תעודת משלוח'}[c.before]||c.before))+'; תוקן ל-'+(isValidIsoDate(c.after)?fmtIsoDate(c.after):({invoice:'חשבונית',delivery_note:'תעודת משלוח'}[c.after]||c.after))).join('\n')+'\nמקור: '+(e.sourceDisplay ? [e.sourceDisplay.kind,e.sourceDisplay.number,isValidIsoDate(e.sourceDisplay.date)?fmtIsoDate(e.sourceDisplay.date):'',e.sourceDisplay.source].filter(Boolean).join(' | ') : 'מסמך שנשמר קודם');
+                const del=document.createElement('button');del.textContent='הפסק להשתמש בתיקון';del.onclick=async()=>{del.disabled=true;try{await window.removeRecognitionExample(e.id);row.remove();}catch(err){del.disabled=false;showToast('לא ניתן להסיר את התיקון כרגע','err');}};row.append(del);box.append(row);
+            }
+            document.body.append(box);
+        };
+        window.removeRecognitionExample=async function(id) {
+            await runTransaction(db,async tx=>{const ref=getSettingsDoc('recognition_examples');const snap=await tx.get(ref);tx.set(ref,{version:1,entries:(snap.exists()&&snap.data().entries||[]).map(e=>e.id===id?{...e,disabled:true}:e)});});
+        };
 
         // ---------------------------------------------------------------------
         // זיהוי סוג מסמך: חשבונית / תעודת משלוח
@@ -1248,6 +1373,8 @@
         }
 
         function applyDocTypeUI() {
+            const tl=document.getElementById('supplierTaxLearningLabel');
+            if(tl) {tl.style.display=scanMode!=='income' && confirmedIssuerCandidates.length>0?'block':'none';if(scanMode==='income'){const cb=document.getElementById('confirmSupplierTaxLearning');if(cb)cb.checked=false;}}
             const isDelivery = (scanMode === 'delivery');
             const isIncome = (scanMode === 'income');
             const typeSel = document.getElementById('docTypeSelect');
@@ -1285,16 +1412,29 @@
                 }
             }
             applyDocTypeUI();
+            renderSupplierSelect();
+            const hintName = document.getElementById('supplierMatchHint');
+            if (hintName) hintName.innerText = scanMode === 'income' ? 'בחר לקוח מרשימת הלקוחות. מזהי המנפיק אינם מזהי לקוח.' : '';
+            refreshPriceAlerts(false);
         };
 
         function renderSupplierSelect() {
             const sel = document.getElementById('invoiceSupplierSelect');
             if (!sel) return;
             const prevVal = sel.value;
-            sel.innerHTML = `<option value="">-- בחר ספק --</option>`
-                + suppliersList.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')
+            const income = scanMode === 'income';
+            const names = income ? customersList : suppliersList;
+            sel.innerHTML = `<option value="">-- בחר ${income ? 'לקוח' : 'ספק'} --</option>`
+                + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')
                 + `<option value="__other__">אחר / לא ברשימה...</option>`;
-            if (prevVal && suppliersList.includes(prevVal)) sel.value = prevVal;
+            // Preserve existing historical names while editing; never add them to the other role's list.
+            const legacy = income && editingInvoiceId ? monthlyIncome.find(r => r.id === editingInvoiceId) : null;
+            const legacyName = legacy ? incomeCustomerName(legacy) : '';
+            if (prevVal && !names.includes(prevVal) && prevVal === legacyName && prevVal !== '-') {
+                const option = document.createElement('option'); option.value = prevVal; option.textContent = prevVal;
+                sel.appendChild(option);
+            }
+            if (prevVal && (names.includes(prevVal) || prevVal === legacyName)) sel.value = prevVal;
         }
 
         window.renderSupplierManageList = renderSupplierManageList;   // נדרש כדי ש-oninput בשדה החיפוש יראה את הפונקציה (הקוד הוא module)
@@ -1322,7 +1462,7 @@
         // ספק שנקרא מהמסמך ואינו ברשימה: שואלים אם להוסיף אותו ולבחור בו (אפשר לתקן את השם לפני ההוספה)
         async function offerAddNewSupplier(rawName) {
             const raw = String(rawName || '').trim();
-            if (!raw) return;
+            if (!raw || scanMode === 'income') return;
             const name = await appPrompt('ספק חדש שלא ברשימה.\nלהוסיף אותו ולבחור בו? אפשר לתקן את השם:', raw, { ok: 'הוסף ובחר', cancel: 'לא, אבחר ידנית' });
             if (name === null) return;
             const clean = name.trim();
@@ -1529,7 +1669,7 @@
             if (!box) return;
             currentPriceChanges = { ups: [], downs: [] };
             box.classList.add('hidden');
-            if (editingInvoiceId) return; // עריכת מסמך קיים - לא בודקים מחדש
+            if (scanMode === 'income' || editingInvoiceId) return; // הכנסות ועריכה אינן מחירון ספקים - לא בודקים מחדש
             const supplierEl = document.getElementById('invoiceSupplierSelect');
             const supplier = supplierEl ? supplierEl.value : '';
             if (!supplier || supplier === '__other__' || recognizedItemsList.length === 0) return;
@@ -1617,8 +1757,11 @@
                     try { await ackOrQueue(setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }), 8000, "רשימת ספקים"); } catch(e){ console.warn("שמירת רשימת ספקים נכשלה:", e); showToast("⚠️ שמירת רשימת הספקים נכשלה - נסה שוב.", "err"); }
                 }
             }
-            await learnSupplierAlias(supplier);
-            const scanMetaAtSave = currentScanMeta;
+            const supplierFeedback = {rawName:lastRecognizedSupplierRaw,rawTax:lastRecognizedTaxId,role:'delivery',taxConfirmed:Boolean(document.getElementById('confirmSupplierTaxLearning')?.checked),confirmed:supplier !== initialSupplierSelection};
+            const learningRawAtSave=document.getElementById('confirmSupplierTaxLearning')?.checked ? correctionRawSnapshot : null;
+            const learningTypeChanged=document.getElementById('docTypeSelect')?.value !== initialTypeSelection;
+            const learningDateChanged=document.getElementById('invoiceDateInput').value !== initialDateSelection;
+            const scanMetaAtSave = currentScanMeta ? {...currentScanMeta,userChanged:document.getElementById('invoiceDateInput').value !== initialDateSelection} : null;
 
             const noteNumber = document.getElementById('invoiceNumberInput').value.trim();
             const noteDate = (document.getElementById('invoiceDateInput').value || '').trim();
@@ -1702,6 +1845,8 @@
                 } else {
                     await ackOrQueue(setDoc(doc(getInvoicesCollection(), noteId), data, { merge: true }), 20000, "שמירת התעודה");
                 }
+                if (navigator.onLine !== false) await learnSupplierAlias(supplier, supplierFeedback);
+                await learnCorrectionExample(learningRawAtSave,{docType:learningTypeChanged?'delivery_note':'',invoiceDate:learningDateChanged?noteDate:''},'delivery',noteId);
                 if (!isUpdate && amount >= 0) {
                     try { await updatePriceBook(supplier, items, noteDate, 'delivery_note'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
@@ -2189,12 +2334,8 @@
             recognizingEl.classList.remove('hidden');
             setRecognitionControlsDisabled(true);
             try {
-                const newResults = [];
-                for (let i = 0; i < newPages.length; i++) {
-                    recognizingEl.innerText = `⏳ מעבד עמוד נוסף ${i + 1} מתוך ${newPages.length}...`;
-                    try { newResults.push(await recognizeOnePage(newPages[i])); }
-                    catch (err) { throw new Error(`עמוד נוסף ${i + 1}: ${err.message}`); }
-                }
+                recognizingEl.innerText = `⏳ מעבד ${newPages.length} עמודים נוספים בבקשה מאוחדת...`;
+                const newResults = await recognizePages(newPages);
                 const allPages = currentScanPages.concat(newPages);
                 const allResults = currentScanResults.concat(newResults);
                 const merged = mergePageResults(allResults);
@@ -2202,6 +2343,10 @@
 
                 currentScanPages = allPages;
                 currentScanResults = allResults;
+                // Do not teach from a stale pre-append snapshot or a manually regrouped layout.
+                correctionRawSnapshot=null;
+                currentScanMeta=scanVerificationMeta(merged,currentScanMeta||{});
+                updateScanVerificationNotice();
                 // עמודים חדשים מסומנים כברירת מחדל; סימונים קיימים נשמרים
                 selectedScanPages = selectedScanPages.concat(newPages.map(() => true));
                 lockedScanPages = lockedScanPages.concat(newPages.map(() => false));
@@ -2230,7 +2375,7 @@
                 const payInput = document.getElementById('invoicePaymentMethodInput');
                 if (!payInput.value.trim() && merged.paymentMethod) payInput.value = merged.paymentMethod;
                 const supSel = document.getElementById('invoiceSupplierSelect');
-                if (!supSel.value && merged.supplier) {
+                if (scanMode !== 'income' && !supSel.value && merged.supplier) {
                     const m = matchSupplier(String(merged.supplier), String(merged.taxId || ''));
                     if (m) supSel.value = m;
                 }
@@ -2438,18 +2583,27 @@
         }
         async function learnDateChoice(supplier, finalDate, meta) {
             try {
-                if (!meta || !meta.dateConflict || !supplier || !finalDate) return;
+                if (!meta || !meta.dateConflict || !meta.userChanged || !supplier || !finalDate || navigator.onLine === false) return;
                 let src = null;
                 if (finalDate === meta.dateFull) src = 'full';
                 else if (finalDate === meta.dateHdr) src = 'header';
                 if (!src) return;   // תיקון ידני לתאריך שלישי - לא לומדים ממנו
-                await ensureDatePrefs();
-                const cur = dateReadPrefs[supplier] || { header: 0, full: 0 };
-                cur[src] = (cur[src] || 0) + 1;
-                if ((cur.header || 0) + (cur.full || 0) > 20) { cur.header = Math.round((cur.header || 0) / 2); cur.full = Math.round((cur.full || 0) / 2); }
-                dateReadPrefs[supplier] = cur;
-                await ackOrQueue(setDoc(getSettingsDoc('date_read_prefs'), { suppliers: dateReadPrefs }), 8000, 'העדפת תאריך');
-            } catch (e) { console.warn('שמירת העדפת תאריך נכשלה:', e); }
+                const ref = getSettingsDoc('date_read_prefs');
+                const updated = await runTransaction(db, async tx=>{
+                    const snap = await tx.get(ref);
+                    const prefs = {...(snap.exists() && snap.data().suppliers || {})};
+                    const cur = {...(prefs[supplier] || {header:0,full:0})};
+                    cur[src] = (cur[src] || 0) + 1;
+                    if ((cur.header||0)+(cur.full||0)>20) {cur.header=Math.round((cur.header||0)/2);cur.full=Math.round((cur.full||0)/2);}
+                    prefs[supplier]=cur;
+                    tx.set(ref,{suppliers:prefs});
+                    return prefs;
+                });
+                dateReadPrefs = updated;
+            } catch (e) {
+                console.warn('שמירת העדפת תאריך נכשלה:', e);
+                showToast('⚠️ המסמך נשמר, אך בחירת התאריך לא נשמרה ללמידה.', 'err');
+            }
         }
 
         // תאריך לא סביר = עתידי או ישן מעל שנה (חשבוניות לא נקראות כך - כמעט תמיד בלבול 4/6)
@@ -2471,6 +2625,15 @@
         function reconcileHeader(parsed, hdr) {
             const meta = { dateConflict: false, dateAlt: '', numberConflict: false, numberAlt: '', typeConflict: false };
             if (!hdr) { autoFixImplausibleDate(parsed, meta); return meta; }
+            // A malformed/incomplete verifier is evidence for review, not authority to replace a read.
+            if (hdr.idContract?.valid === false || [parsed.verification, ...(parsed._pageVerifications || [])].some(v => v && (v.status === 'incomplete' || v.coverageComplete === false || v.header?.idContract?.valid === false))) {
+                const a = String(parsed.invoiceNumber || '').trim(), b = String(hdr.invoiceNumber || '').trim();
+                if (b && a !== b) { meta.numberConflict = true; meta.numberAlt = b; }
+                if (isValidIsoDate(hdr.invoiceDate) && parsed.invoiceDate !== hdr.invoiceDate) {
+                    meta.dateConflict = true; meta.dateAlt = hdr.invoiceDate;
+                }
+                return meta;
+            }
             const dA = isValidIsoDate(parsed.invoiceDate) ? parsed.invoiceDate : '';
             const dB = isValidIsoDate(hdr.invoiceDate) ? hdr.invoiceDate : '';
             if (dA && dB && dA !== dB) {
@@ -2487,9 +2650,11 @@
             }
             else if (!dA && dB) parsed.invoiceDate = dB;
             autoFixImplausibleDate(parsed, meta);
+            const learnedDate=parsed.learning?.changes?.find(c=>c.field==='invoiceDate');
+            if(learnedDate && isValidIsoDate(learnedDate.after)) {parsed.invoiceDate=learnedDate.after;meta.dateConflict=true;meta.dateAlt=hdr.invoiceDate||learnedDate.before;}
             const nA = String(parsed.invoiceNumber || '').trim();
             const nB = String(hdr.invoiceNumber || '').trim();
-            if (nA && nB && nA !== nB) { meta.numberConflict = true; meta.numberAlt = nA; parsed.invoiceNumber = nB; }
+            if (nA && nB && nA !== nB) { meta.numberConflict = true; meta.numberAlt = nB; }
             else if (!nA && nB) parsed.invoiceNumber = nB;
             if (!parsed.taxId && hdr.taxId) parsed.taxId = hdr.taxId;
             if (!parsed.supplier && hdr.supplier) parsed.supplier = hdr.supplier;
@@ -2547,56 +2712,43 @@
             el.innerHTML = `<div style="color:#b9770e;">⚠️ שתי קריאות נתנו מספר שונה - בדוק מול התמונה.</div><div>אולי: ${hintChip(safe, `applyNumberSuggestion(this.textContent)`)}</div>`;
         };
 
-        // פונקציה משותפת: מקבלת base64 (בלי הפריפיקס data:) ושולחת לזיהוי AI דרך ה-Cloud Function,
-        // בין אם התמונה הגיעה מהעלאת קובץ ובין אם מצילום ישיר דרך מצלמת המכשיר
-        // קריאת זיהוי אחת ל-Cloud Function עבור עמוד בודד
-        async function recognizeOnePage(base64Data, opts = {}) {
-            // עד 3 ניסיונות: רשת נופלת / שגיאת שרת זמנית לא אמורות להפיל את הסריקה
-            let lastErr;
-            for (let attempt = 0; attempt < 3; attempt++) {
-                try { return await recognizeOnePageOnce(base64Data, opts); }
-                catch (err) {
-                    lastErr = err;
-                    if (!err.retryable) break;
-                    await new Promise(r => setTimeout(r, 1200 * (attempt + 1)));
-                }
-            }
-            throw lastErr;
-        }
-
-        async function recognizeOnePageOnce(base64Data, opts = {}) {
-            let response;
-            try {
+        // One client request for all pages. No client retry, per-page fallback or header request.
+        // This candidate expects two independent provider reads, capped at three server-side. Legacy server metadata remains explicitly unverified.
+        async function recognizePages(pages) {
             let idTok = '';
-            try { await fbAuth.authStateReady(); idTok = fbAuth.currentUser ? await fbAuth.currentUser.getIdToken() : ''; } catch (e) { console.warn(e); }
-            response = await fetch(RECOGNIZE_FUNCTION_URL, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Authorization": "Bearer " + idTok },
-                body: JSON.stringify({
-                    image: base64Data,
-                    mediaType: 'image/jpeg',
-                    suppliers: suppliersList,
-                    detectDocType: true,
-                    detectHandwriting: !opts.headerOnly,
-                    headerOnly: Boolean(opts.headerOnly),
-                    extraInstructions: EXTRA_OCR_INSTRUCTIONS
-                })
-            });
-            } catch (netErr) {
-                const e = new Error('אין חיבור לשרת הזיהוי - בדוק אינטרנט.'); e.retryable = true; throw e;
+            await fbAuth.authStateReady();
+            if (fbAuth.currentUser) idTok = await fbAuth.currentUser.getIdToken();
+            const headerImages = await Promise.all(pages.map(p=>cropPageHeader(p)));
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 125000);
+            let response, data;
+            try {
+                response = await fetch(RECOGNIZE_FUNCTION_URL, {
+                    method: 'POST', signal: controller.signal,
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + idTok },
+                    body: JSON.stringify({ images: pages, headerImages, mediaType: 'image/jpeg', suppliers: suppliersList,
+                        role:scanMode, detectDocType: true, detectHandwriting: true, extraInstructions: EXTRA_OCR_INSTRUCTIONS })
+                });
+                data = await response.json();
+            } finally { clearTimeout(timer); }
+            if (!response.ok || data.error) throw new Error(data.error || `שגיאת שרת (${response.status})`);
+            if (data.contractVersion !== 2 || !Array.isArray(data.results) || data.results.length !== pages.length
+                || data.results.some(r => !r || typeof r !== 'object' || Array.isArray(r))) {
+                throw new Error('תשובת זיהוי לא תקינה: מספר העמודים או גרסת החוזה אינם תואמים. לא בוצע ניסיון נוסף.');
             }
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok || data.error) {
-                const e = new Error(data.error || `שגיאת שרת (${response.status})`);
-                e.retryable = response.status >= 500 || response.status === 429;
-                throw e;
+            if(data.pipelineVersion===1 && data.results.some(r=>!r.verification || !['compared','conflict','incomplete','unavailable'].includes(r.verification.status))) throw new Error('חסר סטטוס בדיקה לכל עמוד.');
+            if(data.learning?.status==='applied_for_review') showToast('הופעלו דוגמאות תיקון קודמות. יש לבדוק את התוצאה מול המסמך.');
+            const missing = data.results.map((r, i) => r.error || r.unrecognised ? i + 1 : null).filter(Boolean);
+            const needsReview = data.partial || data.amountMismatch || data.degraded || missing.length
+                || data.results.some(r => r.partial || (r.reconciliation && r.reconciliation.status === 'mismatch'));
+            if (needsReview) {
+                const warning = '⚠️ תוצאת הזיהוי דורשת בדיקה ידנית.'
+                    + (missing.length ? ' עמודים שלא זוהו: ' + missing.join(', ') + '.' : '')
+                    + (data.warning ? ' ' + String(data.warning) : '')
+                    + ' לא יושלמו נתונים חסרים ולא יבוצע ניסיון זיהוי נוסף. להציג לסקירה?';
+                if (!await appConfirm(warning)) throw new Error('הסקירה בוטלה. לא בוצע ניסיון נוסף.');
             }
-            const parsed = data.result;
-            if (!parsed || typeof parsed !== 'object') {
-                throw new Error("התשובה מהשרת לא תקינה");
-            }
-            if (data.degraded) showToast("⚠️ הזיהוי בוצע בהגדרות מופחתות (דיוק נמוך יותר) - בדוק את הנתונים מול התמונה.");
-            return parsed;
+            return data.results;
         }
 
         // מאחד תוצאות זיהוי של כמה עמודים לתוצאה אחת:
@@ -2606,7 +2758,7 @@
             const merged = { items: [] };
             results.forEach(r => {
                 if (!r) return;
-                ['supplier', 'invoiceNumber', 'invoiceDate', 'paymentMethod', 'docType', 'taxId'].forEach(k => {
+                ['customer', 'supplier', 'invoiceNumber', 'invoiceDate', 'invoiceDateRaw', 'docTitle', 'paymentMethod', 'docType', 'taxId'].forEach(k => {
                     if (!merged[k] && r[k]) merged[k] = r[k];
                 });
                 if (Array.isArray(r.items)) merged.items.push(...r.items);
@@ -2623,7 +2775,38 @@
                 if (typeof r.vatAmount === 'number' && merged.vatAmount == null) merged.vatAmount = r.vatAmount;
                 if (r.idAmbiguous) merged.idAmbiguous = true;
             });
+            const verifications = results.flatMap(r => r && r._pageVerifications || (r ? [r.verification || {status:'unavailable',header:null,conflicts:[]}] : []));
+            merged._pageVerifications = verifications;
+            merged._learningChanges=results.flatMap(r=>r?.learning?.changes||[]);
+            const headers = verifications.map(v=>v.header).filter(Boolean);
+            if (headers.length) {
+                const header = {items:[]};
+                headers.forEach(h=>['supplier','customer','taxId','docTitle','docType','invoiceNumber','invoiceDateRaw','invoiceDate'].forEach(k=>{if(!header[k]&&h[k])header[k]=h[k];}));
+                merged.verification = {header,status:verifications.every(v=>v.status!=='unavailable')?(verifications.some(v=>v.status==='conflict')?'conflict':'compared'):'unavailable',conflicts:[]};
+            }
+            merged.handwritingCheck={status:results.every(r=>r?.handwritingCheck?.status==='reported')?'reported':'not_reported'};
             return merged;
+        }
+
+        function scanVerificationMeta(parsed, meta) {
+            const all=parsed._pageVerifications || [parsed.verification || {status:'unavailable',conflicts:[]}];
+            meta.learningChanges=(parsed.learning?.changes||[]).concat(parsed._learningChanges||[]);
+            meta.pageVerifications=all;
+            meta.independentComplete=all.length>0 && all.every(v=>(v.status==='compared'||v.status==='conflict')&&v.coverageComplete!==false);
+            meta.handwritingReported=parsed.handwritingCheck?.status==='reported';
+            meta.idContractIncomplete=all.some(v=>v.header?.idContract?.valid===false);
+            meta.verificationConflicts=all.flatMap((v,i)=>(v.conflicts||[]).map(k=>'עמוד '+(i+1)+': '+({invoiceNumber:'מספר מסמך',invoiceDate:'תאריך',docType:'סוג מסמך',supplier:'מנפיק',customer:'לקוח',taxIds:'מזהי מנפיק',taxIdLabels:'תוויות ח.פ / ע.מ של המנפיק'}[k]||'פרט במסמך')));
+            return meta;
+        }
+
+        function updateScanVerificationNotice() {
+            const combinedNotice=document.getElementById('combinedScanNotice');
+            if(!combinedNotice)return;
+    const vm = currentScanMeta || {};
+            combinedNotice.textContent = (vm.learningChanges?.length?'⚠️ דוגמאות קודמות השפיעו על הקריאה: '+vm.learningChanges.map(c=>'נקרא '+(isValidIsoDate(c.before)?fmtIsoDate(c.before):({invoice:'חשבונית',delivery_note:'תעודת משלוח'}[c.before]||c.before))+'; הוצע '+(isValidIsoDate(c.after)?fmtIsoDate(c.after):({invoice:'חשבונית',delivery_note:'תעודת משלוח'}[c.after]||c.after))).join('; ')+'. בדוק מול המקור. ':'') + (vm.independentComplete ? 'בוצעה קריאת כותרת נפרדת לכל עמוד במסמך. שתי קריאות יכולות לטעות; יש לבדוק מול המקור.' : '⚠️ חסרה קריאת כותרת עצמאית בחלק מהעמודים. בדוק מספר, תאריך, סוג וזהות מול המקור.')
+                + (vm.idContractIncomplete ? ' ⚠️ קריאת האימות לא החזירה מזהי מנפיק עם תוויות במבנה הנדרש. אין אימות מלא.' : '')
+                + (vm.verificationConflicts?.length ? ' ⚠️ קריאות שונות: ' + vm.verificationConflicts.join('; ') : '')
+                + (!vm.handwritingReported ? ' בדיקת כתב יד לא דווחה במלואה.' : ' השרת דיווח על חיפוש כתב יד; ייתכן שהוחמצו הערות.');
         }
 
         // ---- פיצול קובץ רב-מסמכי ----
@@ -2899,7 +3082,9 @@
             const keepJ = g.pageIdxs.map((p, j) => owners[String(p + 1)] ? -1 : j).filter(j => j >= 0);
             const parsed = mergePageResults((keepJ.length ? keepJ : g.pageIdxs.map((_, j) => j)).map(j => subResults[j]));
             if (parsed.isCredit && parsed.amount > 0) parsed.amount = -Math.abs(parsed.amount);
-            const meta = reconcileHeader(parsed, null);
+            parsed._learningOriginal=JSON.parse(JSON.stringify(parsed));
+            await ensureDatePrefs();
+            const meta = scanVerificationMeta(parsed, reconcileHeader(parsed, parsed.verification?.header || null));
             meta.handwritingField = Array.isArray(parsed.handwrittenNotes);
             currentScanMeta = meta;
             currentScanPages = subPages.slice();
@@ -2977,7 +3162,7 @@
             confirmForm.classList.add('hidden');
             recognizingEl.classList.remove('hidden');
             setRecognitionControlsDisabled(true);
-            let retryScan = false;
+
 
             try {
                 previewBuildToken++;   // מבטל בנייה ישנה של תצוגה שעדיין רצה
@@ -2986,36 +3171,14 @@
                 recognizedPageCount = pages.length;
                 recognizedImageBase64 = await buildScanPreview(pages);
 
-                // קריאת הכותרת (תאריך/מספר מסמך) רצה במקביל לקריאת העמודים - במקום אחריהם
-                const hdrPromise = (async () => {
-                    try { return await recognizeOnePage(await cropPageHeader(pages[0]), { headerOnly: true }); }
-                    catch (e) { console.warn('קריאת כותרת שנייה נכשלה:', e); return null; }
-                })();
-
-                // עמודים במקביל (עד 3 בו-זמנית), התוצאות נשמרות לפי סדר העמודים
-                const results = new Array(pages.length);
-                let nextIdx = 0, doneCount = 0;
-                if (pages.length > 1) recognizingEl.innerText = `⏳ מעבד ${pages.length} עמודים...`;
-                const worker = async () => {
-                    while (nextIdx < pages.length) {
-                        const i = nextIdx++;
-                        try {
-                            results[i] = await recognizeOnePage(pages[i]);
-                        } catch (err) {
-                            throw (pages.length > 1) ? new Error(`עמוד ${i + 1}: ${err.message}`) : err;
-                        }
-                        doneCount++;
-                        if (pages.length > 1 && doneCount < pages.length) recognizingEl.innerText = `⏳ עובד... ${doneCount}/${pages.length} עמודים`;
-                    }
-                };
-                await Promise.all(Array.from({ length: Math.min(3, pages.length) }, worker));
+                recognizingEl.innerText = `⏳ מעבד ${pages.length} עמודים בבקשה מאוחדת אחת...`;
+                const results = await recognizePages(pages);
 
                 // פיצול: מספרי מסמך שונים בין העמודים = מסמכים נפרדים, כל אחד מאושר ונשמר בנפרד.
                 // כל עמוד שהזהות שלו לא נקראה (כל עמוד ללא מספר) פותח את מסך ההכרעה - אין שיוך שקט בשום צורה.
                 const splitInfo = (pages.length > 1) ? groupScanPages(results) : null;
                 const splitNeeded = splitInfo && (splitInfo.groups.length > 1 || splitInfo.ambiguous.length > 0);
                 if (splitNeeded) {
-                    try { await hdrPromise; } catch (e) {}   // במצב פיצול לא משתמשים בקריאת הכותרת הנפרדת
                     const decidedGroups = await showSplitSummary(results, splitInfo);
                     if (decidedGroups) {
                         splitScanState = { groups: decidedGroups, pages: pages.slice(), results: results.slice(), idx: 0 };
@@ -3030,14 +3193,15 @@
                     parsed.amount = -Math.abs(parsed.amount);
                 }
 
-                // קריאה שנייה של כותרת העמוד הראשון (מוגדלת) - לאימות סוג מסמך, מספר ותאריך
-                const hdrParsed = await hdrPromise;
+                // The capped server pipeline supplies a separately read header for every page.
+                const hdrParsed = parsed.verification?.header || null;
 
+                parsed._learningOriginal=JSON.parse(JSON.stringify(parsed));
                 await ensureDatePrefs();
-                const meta = reconcileHeader(parsed, hdrParsed);
+                const meta = scanVerificationMeta(parsed, reconcileHeader(parsed, hdrParsed));
                 meta.handwritingField = Array.isArray(parsed.handwrittenNotes);
                 let det = detectDocType(parsed);
-                if (hdrParsed) {
+                if (hdrParsed && !meta.idContractIncomplete && meta.independentComplete) {
                     const dh = detectDocType(hdrParsed);
                     if (dh.type !== det.type) {
                         // כותרת המסמך היא האינדיקציה החזקה - אם היא חד-משמעית, היא קובעת; בכל מקרה מבקשים בדיקה
@@ -3045,11 +3209,12 @@
                         meta.typeConflict = true;
                     }
                 }
+                if(parsed.learning?.changes?.some(c=>c.field==='docType')) det={type:detectDocType(parsed).type,sure:false,conflict:true};
                 const rawFull = String(parsed.docType || parsed.documentType || '').trim();
                 const rawHdr = hdrParsed ? String(hdrParsed.docType || hdrParsed.documentType || '').trim() : '';
                 meta.docTypeNote = (!rawFull && !rawHdr)
                     ? 'השרת לא החזיר סוג מסמך - הסוג נוחש לפי פריטים ואמצעי תשלום בלבד.'
-                    : `השרת החזיר: ${rawFull || '—'} (עמוד מלא) / ${rawHdr || '—'} (כותרת)${(hdrParsed && hdrParsed.docTitle) || parsed.docTitle ? ' | כותרת מודפסת: "' + ((hdrParsed && hdrParsed.docTitle) || parsed.docTitle) + '"' : ''}.`;
+                    : `השרת החזיר: ${rawFull || '—'} בקריאה המאוחדת${parsed.docTitle ? ' | כותרת מודפסת: "' + parsed.docTitle + '"' : ''}. ${meta.independentComplete ? 'בוצעה השוואה עצמאית; יש לבדוק מול המקור.' : 'ההשוואה העצמאית חסרה בחלק מהעמודים.'}`;
                 currentScanMeta = meta;
                 currentScanPages = pages.slice();
                 currentScanResults = results.slice();
@@ -3059,14 +3224,14 @@
                 autoDetectedDocType = det;
                 openInvoiceConfirmForm(parsed, null, itemsMismatchTotal(parsed));
             } catch (err) {
-                retryScan = await appConfirm("הזיהוי נכשל: " + err.message + "\nלנסות שוב?", { ok: '🔄 נסה שוב', cancel: 'מילוי ידני' });
-                if (!retryScan) openInvoiceConfirmForm(null, null);
+                alert('הזיהוי לא הושלם: ' + err.message + '\nלא בוצע ניסיון נוסף. אפשר למלא ידנית.');
+                openInvoiceConfirmForm(null, null);
             } finally {
                 recognizingEl.innerText = recognizingEl.dataset.baseText;
                 recognizingEl.classList.add('hidden');
                 setRecognitionControlsDisabled(false);
             }
-            if (retryScan) return processScanPages(pages);
+
         }
 
         // פותח את החשבונית שנסרקה כרגע במסך מלא (נסגר בכפתור "סגור")
@@ -3385,6 +3550,8 @@
             pendingNewDocId = pendingInboxItem
                 ? (splitScanState ? pendingInboxItem.id + '__' + splitDocKey(splitScanState.groups[splitScanState.idx], splitScanState.results) : pendingInboxItem.id)
                 : null;
+            correctionRawSnapshot = recognized ? JSON.parse(JSON.stringify(recognized)) : null;
+            confirmedIssuerCandidates=globalThis.InvoiceLearning?InvoiceLearning.ids(recognized):[];
             const confirmForm = document.getElementById('invoiceConfirmForm');
             const imgWrap = document.getElementById('invoicePreviewImgWrap');
             const formTitle = document.getElementById('confirmFormTitle');
@@ -3414,6 +3581,7 @@
 
             renderSupplierSelect();
             const supplierSel = document.getElementById('invoiceSupplierSelect');
+            initialSupplierSelection = '';
             const numberInput = document.getElementById('invoiceNumberInput');
             const dateInput = document.getElementById('invoiceDateInput');
             const amountInput = document.getElementById('invoiceAmountInput');
@@ -3438,15 +3606,17 @@
                 const hintElEdit = document.getElementById('supplierMatchHint');
                 if (hintElEdit) hintElEdit.innerText = '';
                 lastRecognizedSupplierRaw = ''; lastRecognizedTaxId = '';
-                if (suppliersList.includes(existingInvoice.supplier)) {
-                    supplierSel.value = existingInvoice.supplier;
-                } else if (existingInvoice.supplier) {
+                const existingParty = scanMode === 'income' ? incomeCustomerName(existingInvoice) : existingInvoice.supplier;
+                const roleList = scanMode === 'income' ? customersList : suppliersList;
+                if (roleList.includes(existingParty)) {
+                    supplierSel.value = existingParty;
+                } else if (existingParty && existingParty !== '-') {
                     // שם שמקורו מחוץ לרשימת הספקים (למשל לקוח של חשבונית הכנסה) - מציגים אותו כדי שלא יאבד בעריכה
                     const opt = document.createElement('option');
-                    opt.value = existingInvoice.supplier;
-                    opt.textContent = existingInvoice.supplier;
+                    opt.value = existingParty;
+                    opt.textContent = existingParty;
                     supplierSel.appendChild(opt);
-                    supplierSel.value = existingInvoice.supplier;
+                    supplierSel.value = existingParty;
                 } else {
                     supplierSel.value = '__other__';
                 }
@@ -3472,6 +3642,13 @@
 
                 lastRecognizedSupplierRaw = (recognized && recognized.supplier) ? String(recognized.supplier) : '';
                 lastRecognizedTaxId = (recognized && (recognized.taxId || recognized.businessId)) ? String(recognized.taxId || recognized.businessId) : '';
+                if (scanMode === 'income') {
+                    // supplier/taxIds from OCR describe the issuer. Only an explicit customer field may select a recipient.
+                    const explicitCustomer = String(recognized && recognized.customer || '').trim();
+                    supplierSel.value = customersList.includes(explicitCustomer) ? explicitCustomer : '';
+                    const hint = document.getElementById('supplierMatchHint');
+                    if (hint) { hint.style.color = '#b9770e'; hint.innerText = 'בחר לקוח. שם המנפיק ומזהיו אינם משמשים לזיהוי לקוח.'; }
+                } else {
                 // מזהים מרובים: זיהוי לפי מפת הכינויים פר-מזהה; קונפליקט = בחירה ידנית בלבד, בלי מיזוג
                 const idMatch = matchSupplierByIds(recognized && recognized.taxIds);
                 const matchedSupplier = matchSupplier(lastRecognizedSupplierRaw, lastRecognizedTaxId) || idMatch.supplier;
@@ -3497,6 +3674,7 @@
                             : 'לא זוהה ספק. בחר ספק ידנית.';
                     }
                     if (lastRecognizedSupplierRaw.trim()) setTimeout(() => offerAddNewSupplier(lastRecognizedSupplierRaw), 300);
+                }
                 }
                 notesInput.value = '';
 
@@ -3542,10 +3720,37 @@
             renderPageSelector();
             const addRow = document.getElementById('addPagesRow');
             if (addRow) addRow.classList.toggle('hidden', Boolean(existingInvoice) || currentScanPages.length === 0);
+            let taxLearnLabel = document.getElementById('supplierTaxLearningLabel');
+            if(!taxLearnLabel) {
+                taxLearnLabel=document.createElement('label');taxLearnLabel.id='supplierTaxLearningLabel';
+                taxLearnLabel.style.cssText='font-size:0.85em;color:#765a18;display:block;margin:5px 0;line-height:1.5;';
+                supplierSel.insertAdjacentElement('afterend',taxLearnLabel);
+            }
+            let manageLearning=document.getElementById('manageRecognitionLearning');
+            if(!manageLearning){manageLearning=document.createElement('button');manageLearning.id='manageRecognitionLearning';manageLearning.type='button';manageLearning.textContent='ניהול תיקונים לזיהוי';manageLearning.style.cssText='font-size:0.8em;width:auto;margin:4px 0;';manageLearning.onclick=window.manageRecognitionExamples;taxLearnLabel.insertAdjacentElement('afterend',manageLearning);}
+            taxLearnLabel.replaceChildren();
+            const taxLearningAllowed=!existingInvoice && scanMode!=='income' && confirmedIssuerCandidates.length>0;
+            taxLearnLabel.style.display=taxLearningAllowed?'block':'none';
+            if(taxLearningAllowed) {
+                const cb=document.createElement('input');cb.type='checkbox';cb.id='confirmSupplierTaxLearning';cb.style.cssText='width:16px;vertical-align:middle;margin-left:5px;';
+                taxLearnLabel.append(cb,document.createTextNode('בדקתי מול המקור: מזהי המנפיק '+confirmedIssuerCandidates.join(', ')+' שייכים לספק שבחרתי. לזכור לזיהוי הבא.'));
+            }
+            initialSupplierSelection = supplierSel.value;
+            initialDateSelection = dateInput.value;
+            initialTypeSelection = document.getElementById('docTypeSelect')?.value;
+            let combinedNotice = document.getElementById('combinedScanNotice');
+            if (!combinedNotice) {
+                combinedNotice = document.createElement('div'); combinedNotice.id = 'combinedScanNotice';
+                combinedNotice.style.cssText = 'background:#fff3cd;color:#795b00;padding:10px;border-radius:8px;margin:8px 0;line-height:1.5;font-size:0.9em;';
+                formTitle.insertAdjacentElement('afterend', combinedNotice);
+            }
+            updateScanVerificationNotice();
+            combinedNotice.classList.toggle('hidden', Boolean(existingInvoice) || currentScanPages.length === 0);
             const hwStatus = document.getElementById('handwritingStatus');
             if (hwStatus) {
                 const m = currentScanMeta;
                 if (existingInvoice || !m) hwStatus.innerHTML = '';
+                else if (currentScanPages.length && !m.handwritingReported) hwStatus.innerHTML = '<span style="color:#b9770e;">⚠️ בדיקת כתב יד לא דווחה במלואה - יש לבדוק מול המקור.</span>';
                 else if (!m.handwritingField) hwStatus.innerHTML = '<span style="color:#b9770e;">⚠️ השרת לא החזיר שדה כתב יד - יש לפרוס מחדש את הפונקציה recognizeInvoice המעודכנת.</span>';
                 else if (!handwrittenNotesList.length) hwStatus.innerHTML = '<span style="color:#999;">לא זוהה כתב יד במסמך.</span>';
                 else hwStatus.innerHTML = '';
@@ -3639,18 +3844,29 @@
             // חשבונית הכנסה: נבחרה במפורש בסוג המסמך, או שכתבו "הכנסה" בשדה אמצעי התשלום -
             // נשמרת ברשימת ההכנסות הנפרדת ולא נכנסת לדוח הספקים החודשי.
             const isIncome = (scanMode === 'income') || document.getElementById('invoicePaymentMethodInput').value.trim() === 'הכנסה';
+            if (isIncome && scanMode !== 'income') {
+                scanMode = 'income'; applyDocTypeUI(); renderSupplierSelect();
+                alert('המסמך סווג כהכנסה. בחר לקוח מרשימת הלקוחות לפני השמירה.'); return;
+            }
             if (!supplier) { alert(isIncome ? "אנא בחר לקוח." : "אנא בחר ספק."); return; }
             if (supplier === '__other__') {
                 const custom = await appPrompt(isIncome ? "הקלד את שם הלקוח:" : "הקלד את שם הספק:");
                 if (!custom || !custom.trim()) { alert(isIncome ? "אנא הכנס שם לקוח." : "אנא הכנס שם ספק."); return; }
                 supplier = custom.trim();
+                if (isIncome) {
+                    try { await persistNewCustomer(supplier); }
+                    catch (e) { alert('לא ניתן להוסיף לקוח: ' + e.message); return; }
+                }
                 if (!isIncome && !suppliersList.includes(supplier)) {
                     suppliersList.push(supplier);
                     try { await ackOrQueue(setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }), 8000, "רשימת ספקים"); } catch(e){ console.warn("שמירת רשימת ספקים נכשלה:", e); showToast("⚠️ שמירת רשימת הספקים נכשלה - נסה שוב.", "err"); }
                 }
             }
-            if (!isIncome) await learnSupplierAlias(supplier);
-            const scanMetaAtSave = currentScanMeta;
+            const supplierFeedback = {rawName:lastRecognizedSupplierRaw,rawTax:lastRecognizedTaxId,role:isIncome?'income':'invoice',taxConfirmed:Boolean(document.getElementById('confirmSupplierTaxLearning')?.checked),confirmed:supplier !== initialSupplierSelection};
+            const learningRawAtSave=document.getElementById('confirmSupplierTaxLearning')?.checked ? correctionRawSnapshot : null;
+            const learningTypeChanged=document.getElementById('docTypeSelect')?.value !== initialTypeSelection;
+            const learningDateChanged=document.getElementById('invoiceDateInput').value !== initialDateSelection;
+            const scanMetaAtSave = currentScanMeta ? {...currentScanMeta,userChanged:document.getElementById('invoiceDateInput').value !== initialDateSelection} : null;
 
             const invoiceNumber = document.getElementById('invoiceNumberInput').value.trim();
             const amount = parseFloat(document.getElementById('invoiceAmountInput').value);
@@ -3698,6 +3914,10 @@
                     id: invoiceId, docType: isIncome ? 'income' : 'invoice', supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,
                     items: recognizedItemsList, handwrittenNotes: keptHandwrittenNotes()
                 };
+                if (isIncome && editingInvoiceId) {
+                    const oldIncome = monthlyIncome.find(r => r.id === editingInvoiceId);
+                    if (oldIncome && Object.prototype.hasOwnProperty.call(oldIncome, 'customer')) invData.customer = supplier;
+                }
                 if (recognizedChargesList.length) invData.charges = recognizedChargesList;
                 if (recognizedTaxIds.length) invData.taxIds = recognizedTaxIds;
                 if (recognizedSubtotalBeforeVat != null) invData.subtotalBeforeVat = recognizedSubtotalBeforeVat;
@@ -3754,6 +3974,8 @@
                         "שמירת החשבונית"
                     );
                 }
+                if (!isIncome && navigator.onLine !== false) await learnSupplierAlias(supplier, supplierFeedback);
+                await learnCorrectionExample(learningRawAtSave,{docType:learningTypeChanged?'invoice':'',invoiceDate:learningDateChanged?invoiceDate:''},isIncome?'income':'invoice',invoiceId);
                 if (!isIncome && !isUpdate && amount > 0) {
                     try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
@@ -4545,7 +4767,7 @@
                 const dateTxt = inv.invoiceDate ? inv.invoiceDate.split('-').reverse().join('/') : '-';
                 const headerHtml = `
                     <div style="text-align:center; border-bottom:2px solid #2c3e50; padding-bottom:4mm; margin-bottom:6mm; font-family:Arial, sans-serif;">
-                        <div style="font-size:18pt; font-weight:bold;">חשבונית הכנסה - ${esc(inv.supplier || '')}</div>
+                        <div style="font-size:18pt; font-weight:bold;">חשבונית הכנסה - ${esc(incomeCustomerName(inv))}</div>
                         <div style="font-size:11pt; color:#555; margin-top:2mm;">
                             מספר: <b>${esc(inv.invoiceNumber || '-')}</b>
                             &nbsp;|&nbsp; תאריך: <b>${esc(dateTxt)}</b>
@@ -4833,7 +5055,7 @@
         const BACKUP_KEEP = 10;              // כמה גיבויים שומרים (הישנים נמחקים)
         const BACKUP_CHUNK = 300000;         // גודל חתיכה במסמך (מסמך Firestore מוגבל ל-1MB)
         const AUTO_BACKUP_DAYS = 7;
-        const BACKUP_SETTINGS_ALLOWED = id => id === 'suppliers_list' || id === 'supplier_aliases' || id === 'date_read_prefs' || id.startsWith('price_book_') || id.startsWith('report_edits');
+        const BACKUP_SETTINGS_ALLOWED = id => id === 'recognition_examples' || id === 'customers_list' || id === 'suppliers_list' || id === 'supplier_aliases' || id === 'date_read_prefs' || id.startsWith('price_book_') || id.startsWith('report_edits');
         const backupDocId = ts => `backup_${ts}`;
 
         async function buildBackupPayload() {
@@ -5005,7 +5227,10 @@
                 });
                 for (const id of settingsIds) {
                     let data = payload.settings[id];
-                    if (id === 'suppliers_list' && mode === 'missing' && haveSet.has(id)) {
+                    if (id === 'customers_list' && mode === 'missing' && haveSet.has(id)) {
+                        const cur = (await getDoc(getSettingsDoc(id))).data() || {};
+                        data = { ...cur, customers: cleanCustomerNames([...(cur.customers || []), ...((data && data.customers) || [])]) };
+                    } else if (id === 'suppliers_list' && mode === 'missing' && haveSet.has(id)) {
                         const cur = (await getDoc(getSettingsDoc(id))).data() || {};
                         data = { ...cur, suppliers: Array.from(new Set([...(cur.suppliers || []), ...((data && data.suppliers) || [])])) };
                     } else if (mode === 'missing' && haveSet.has(id)) continue;

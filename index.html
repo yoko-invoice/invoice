@@ -19,6 +19,8 @@
 
     <link rel="apple-touch-icon" href="icon-192.png">
     <link rel="stylesheet" href="styles.css">
+<script src="server-candidate/learning.js"></script>
+<style>body:has(#invoiceConfirmForm:not(.hidden)) #inboxFab {display:none!important}</style>
 </head>
 <body>
 <div id="imgViewerOverlay" class="hidden">
@@ -399,6 +401,16 @@
             </div>
             <input type="text" id="supplierFilterInput" placeholder="🔍 חפש ספק..." oninput="renderSupplierManageList()" style="margin-top:8px;">
             <div id="supplierListManage" style="margin-top:6px;"></div>
+        </div>
+
+        <div class="card" id="customerManageCard">
+            <h3 style="margin-top:0;">ניהול רשימת לקוחות:</h3>
+            <p style="font-size:0.85em;color:#555;">להכנסות בלבד. אותו עסק יכול להופיע גם כספק; הרשימות נשמרות בנפרד.</p>
+            <div style="display:flex;gap:6px;">
+                <input id="newCustomerNameInput" type="text" placeholder="שם לקוח חדש...">
+                <button onclick="addCustomerToList()" style="width:auto;background:#8e44ad;white-space:nowrap;">הוסף לקוח</button>
+            </div>
+            <div id="customerListManage" style="margin-top:6px;"></div>
         </div>
 
         <div id="bioSettings" class="hidden" style="text-align:center; margin:8px 0;">

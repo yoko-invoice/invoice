@@ -297,6 +297,10 @@
         let monthlyIncome = [];            // חשבוניות הכנסה של החודש הנבחר - נשמרות בנפרד, לא נכנסות לדוח הספקים/גרפים
         let recognizedImageBase64 = null;
         let recognizedItemsList = [];
+        let recognizedChargesList = [];        // חיובים נפרדים (הובלה/אגרה/הנחת עיגול) כפי שנקראו - נשמרים עם החשבונית
+        let recognizedTaxIds = [];             // מזהי מנפיק כפי שנקראו (ע.מ/ח.פ עם תוויות) - נשמרים עם החשבונית
+        let recognizedSubtotalBeforeVat = null; // סכום לפני מע"מ כפי שמודפס
+        let recognizedVatAmount = null;         // סכום מע"מ כפי שמודפס
         let editingInvoiceId = null;
         // מזהה קבוע למסמך חדש לאורך כל ניסיונות השמירה באותו טופס: אם שמירה חרגה בזמן אך בפועל הצליחה,
         // ניסיון חוזר ידרוס את אותו מסמך במקום ליצור כפילות
@@ -1138,6 +1142,18 @@
             return scored[0].sup;
         }
 
+        // מזהי מנפיק מרובים (למשל ח.פ וגם ע.מ): מנסים כל מזהה מול מפת הכינויים.
+        // שני מזהים שמצביעים לספקים שונים = קונפליקט גלוי - בלי בחירה ובלי מיזוג אוטומטי.
+        // מזהה אחד תואם אינו ראיה ששאר המזהים שייכים לאותו ספק - לא לומדים אותם אוטומטית.
+        function matchSupplierByIds(taxIds) {
+            if (!Array.isArray(taxIds) || !taxIds.length) return { supplier: '', conflict: false };
+            const hits = [...new Set(taxIds
+                .map(t => { const tax = String(t && t.value || '').replace(/\D/g, ''); return tax.length >= 8 ? supplierAliases.taxIds[tax] : null; })
+                .filter(s => s && suppliersList.includes(s)))];
+            if (hits.length > 1) return { supplier: '', conflict: true, hits };
+            return { supplier: hits[0] || '', conflict: false };
+        }
+
         // לומד כינוי חדש כשבחרת ספק ידנית - בפעם הבאה הזיהוי יהיה אוטומטי
         async function learnSupplierAlias(chosenSupplier) {
             try {
@@ -1703,6 +1719,7 @@
                 if (!moreSplitDocs) { reopenInboxIfNeeded(); splitScanState = null; }
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
+                recognizedChargesList = []; recognizedTaxIds = []; recognizedSubtotalBeforeVat = null; recognizedVatAmount = null;
                 handwrittenNotesList = [];
                 editingInvoiceId = null;
                 editCropInvoice = null;
@@ -2195,9 +2212,9 @@
 
                 // פריטים: מאוחדים מכל העמודים
                 recognizedItemsList = Array.isArray(merged.items) ? merged.items : [];
-                document.getElementById('invoiceItemsDisplay').innerHTML = recognizedItemsList.length
+                document.getElementById('invoiceItemsDisplay').innerHTML = (recognizedItemsList.length
                     ? recognizedItemsList.map(it => `• <b>${esc(it.name)}</b> - כמות: ${esc(it.quantity || 1)}${it.price ? ' (' + it.price + ' ₪)' : ''}`).join('<br>')
-                    : 'לא זוהו פרטים בשרת.';
+                    : 'לא זוהו פרטים בשרת.') + chargesHtml(merged.charges);
 
                 // סכום: מתעדכן רק אם המשתמש לא שינה אותו ידנית
                 const amountInput = document.getElementById('invoiceAmountInput');
@@ -2226,7 +2243,12 @@
                 if (hwStatus && handwrittenNotesList.length) hwStatus.innerHTML = '';
 
                 const mismatchBox = document.getElementById('mismatchWarningBox');
-                if (mismatchBox) mismatchBox.classList.toggle('hidden', !itemsMismatchTotal(merged));
+                if (mismatchBox) {
+                    const showMismatch = itemsMismatchTotal(merged);
+                    mismatchBox.classList.toggle('hidden', !showMismatch);
+                    const det = showMismatch ? itemsMismatchDetail(merged) : '';
+                    mismatchBox.innerHTML = '⚠️ סכום הפריטים לא תואם לסכום הכולל - בדוק מול החשבונית.' + (det ? ' ' + esc(det) : '');
+                }
                 refreshDateHint(); refreshNumberHint();
                 refreshPriceAlerts(true);
             } catch (err) {
@@ -2273,7 +2295,43 @@
         // בעוד הסכום הכולל המדווח כולל מע"מ - זה תקין ולא "פער" אמיתי, וצריך לזהות את הדפוס הזה.
         const CURRENT_VAT_RATE = 0.18;
 
+        // הצגת חיובים/זיכויים ברמת מסמך (הובלה/אגרות/הנחות/עיגול) - מופרדים מהפריטים כדי לא לזהם את המחירון
+        function chargesHtml(charges) {
+            if (!Array.isArray(charges) || !charges.length) return '';
+            return '<div style="margin-top:6px; font-size:0.92em; color:#555;">חיובים/זיכויים נוספים ברמת המסמך (לא נכנסים למחירון):<br>' +
+                charges.map(c => `• ${esc(c.label || 'חיוב')} (${esc(String(c.amount))} ₪)`).join('<br>') + '</div>';
+        }
+
+        // נתיב דטרמיניסטי: כשהשרת החזיר ערכי סיכום מודפסים (חוזה חדש) - משווים מולם בלבד.
+        // ערכים חסרים אינם "פטור ממע\"מ" ואינם רשות לעבור בשקט: סכום-ביניים מודפס בלי שורת מע"מ = אזהרה.
+        // אפסילון 0.05 סופג עיגול הדפסה של הספק בלבד (כמו סטיית 0.03 פנימית במסמך) - לא פערי חילוץ.
+        const PRINT_EPSILON = 0.05;
+        function itemsMismatchDetail(parsed) {
+            if (!parsed || typeof parsed.amount !== 'number') return '';
+            if (parsed.subtotalBeforeVat == null && parsed.vatAmount == null && !(Array.isArray(parsed.charges) && parsed.charges.length)) return '';
+            const items = Array.isArray(parsed.items) ? parsed.items : [];
+            const itemsSum = items.reduce((s, it) => s + Math.abs(Number(it.price) || 0), 0);
+            const chargesSum = (parsed.charges || []).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+            const amount = Math.abs(parsed.amount);
+            if (parsed.subtotalBeforeVat != null) {
+                const d1 = (itemsSum + chargesSum) - parsed.subtotalBeforeVat;
+                if (Math.abs(d1) > PRINT_EPSILON) return `פער ${round2(d1)} ₪ בין פרטים+חיובים (${round2(itemsSum + chargesSum)}) לסכום-הביניים המודפס (${parsed.subtotalBeforeVat})`;
+                if (parsed.vatAmount != null) {
+                    const d2 = (parsed.subtotalBeforeVat + parsed.vatAmount) - amount;
+                    if (Math.abs(d2) > PRINT_EPSILON) return `פער ${round2(d2)} ₪ בין סכום-ביניים+מע"מ מודפסים לסכום הכולל`;
+                    return '';
+                }
+                return 'מודפס סכום-ביניים ללא שורת מע"מ - ההתאמה לא מאומתת';
+            }
+            const d0 = (itemsSum + chargesSum) - amount;
+            return Math.abs(d0) > PRINT_EPSILON ? `פער ${round2(d0)} ₪ בין פרטים+חיובים לסכום הכולל` : '';
+        }
+
         function itemsMismatchTotal(parsed) {
+            // נתיב ערכים מודפסים: פרט כלשהו = אזהרה (הפער בפועל מוצג; לא מתקנים דבר)
+            if (itemsMismatchDetail(parsed) !== '') return true;
+            const hasPrintedFields = parsed && (parsed.subtotalBeforeVat != null || parsed.vatAmount != null || (Array.isArray(parsed.charges) && parsed.charges.length));
+            if (hasPrintedFields) return false;   // נבדק ונמצא תקין מול ערכים מודפסים - לא נופלים להיוריסטיקה
             if (!parsed || !Array.isArray(parsed.items) || parsed.items.length === 0) return false;
             if (typeof parsed.amount !== 'number') return false;
 
@@ -2555,6 +2613,15 @@
                 if (r.isCredit) merged.isCredit = true;
                 if (Array.isArray(r.handwrittenNotes)) merged.handwrittenNotes = (merged.handwrittenNotes || []).concat(r.handwrittenNotes);
                 if (typeof r.amount === 'number') merged.amount = r.amount;
+                // שדות חוזה חדשים: עמלות/מזהים מכל העמודים, ערכי סיכום מודפסים ראשונים-לא-ריקים
+                if (Array.isArray(r.charges) && r.charges.length) merged.charges = (merged.charges || []).concat(r.charges);
+                if (Array.isArray(r.taxIds) && r.taxIds.length) {
+                    merged.taxIds = merged.taxIds || [];
+                    r.taxIds.forEach(t => { if (t && t.value && !merged.taxIds.some(x => x.value === t.value)) merged.taxIds.push(t); });
+                }
+                if (typeof r.subtotalBeforeVat === 'number' && merged.subtotalBeforeVat == null) merged.subtotalBeforeVat = r.subtotalBeforeVat;
+                if (typeof r.vatAmount === 'number' && merged.vatAmount == null) merged.vatAmount = r.vatAmount;
+                if (r.idAmbiguous) merged.idAmbiguous = true;
             });
             return merged;
         }
@@ -2724,7 +2791,7 @@
             scanMode = (inv.docType === 'income') ? 'income' : 'invoice';
             recognizedImageBase64 = null;
             currentScanMeta = null;
-            openInvoiceConfirmForm(null, inv);
+            openInvoiceConfirmForm(null, inv, itemsMismatchTotal(inv));
             return true;
         }
         function splitGroupParts(g, results) {
@@ -3325,7 +3392,11 @@
             const itemsDisplay = document.getElementById('invoiceItemsDisplay');
             const duplicateBox = document.getElementById('duplicateWarningBox');
             const mismatchBox = document.getElementById('mismatchWarningBox');
-            if (mismatchBox) mismatchBox.classList.toggle('hidden', !itemsMismatch);
+            if (mismatchBox) {
+                mismatchBox.classList.toggle('hidden', !itemsMismatch);
+                const det = itemsMismatch ? itemsMismatchDetail(recognized || existingInvoice) : '';
+                mismatchBox.innerHTML = '⚠️ סכום הפריטים לא תואם לסכום הכולל - בדוק מול החשבונית.' + (det ? ' ' + esc(det) : '');
+            }
 
             const isDeliveryMode = (scanMode === 'delivery');
             const typeGroupEl = document.getElementById('docTypeGroup');
@@ -3385,6 +3456,10 @@
                 paymentInput.value = existingInvoice.paymentMethod ?? '';
                 notesInput.value = (existingInvoice.notes === 'חשבונית זיכוי') ? '' : (existingInvoice.notes ?? '');
                 recognizedItemsList = existingInvoice.items || [];
+                recognizedChargesList = Array.isArray(existingInvoice.charges) ? existingInvoice.charges : [];
+                recognizedTaxIds = Array.isArray(existingInvoice.taxIds) ? existingInvoice.taxIds : [];
+                recognizedSubtotalBeforeVat = existingInvoice.subtotalBeforeVat ?? null;
+                recognizedVatAmount = existingInvoice.vatAmount ?? null;
                 handwrittenNotesList = normalizeHandwrittenNotes(existingInvoice.handwrittenNotes);
             } else {
                 editingInvoiceId = null;
@@ -3397,9 +3472,19 @@
 
                 lastRecognizedSupplierRaw = (recognized && recognized.supplier) ? String(recognized.supplier) : '';
                 lastRecognizedTaxId = (recognized && (recognized.taxId || recognized.businessId)) ? String(recognized.taxId || recognized.businessId) : '';
-                const matchedSupplier = matchSupplier(lastRecognizedSupplierRaw, lastRecognizedTaxId);
+                // מזהים מרובים: זיהוי לפי מפת הכינויים פר-מזהה; קונפליקט = בחירה ידנית בלבד, בלי מיזוג
+                const idMatch = matchSupplierByIds(recognized && recognized.taxIds);
+                const matchedSupplier = matchSupplier(lastRecognizedSupplierRaw, lastRecognizedTaxId) || idMatch.supplier;
                 const hintEl = document.getElementById('supplierMatchHint');
-                if (matchedSupplier) {
+                if (idMatch.conflict) {
+                    supplierSel.value = '';
+                    if (hintEl) { hintEl.style.color = '#c0392b'; hintEl.innerText = '⚠️ מזהים שונים בחשבונית מקושרים לספקים שונים (' + idMatch.hits.join(', ') + ') - בדוק ובחר ידנית. לא אוחד דבר.'; }
+                } else if (recognized && recognized.idAmbiguous && hintEl) {
+                    if (matchedSupplier) { supplierSel.value = matchedSupplier; recognized.supplier = matchedSupplier; }
+                    else supplierSel.value = '';
+                    hintEl.style.color = '#b9770e';
+                    hintEl.innerText = 'מודפסים כמה מזהי מנפיק - לא נבחר מזהה אוטומטית. ' + (matchedSupplier ? `הספק זוהה לפי שם/מזהה מוכר: ${matchedSupplier}.` : 'בחר ספק ידנית.');
+                } else if (matchedSupplier) {
                     supplierSel.value = matchedSupplier;
                     recognized.supplier = matchedSupplier;
                     if (hintEl) { hintEl.style.color = '#16a085'; hintEl.innerText = '✓ הספק זוהה אוטומטית'; }
@@ -3424,6 +3509,10 @@
                 amountInput.value = (recognized && typeof recognized.amount === 'number') ? recognized.amount : '';
                 paymentInput.value = (recognized && recognized.paymentMethod) ? recognized.paymentMethod : '';
                 recognizedItemsList = (recognized && Array.isArray(recognized.items)) ? recognized.items : [];
+                recognizedChargesList = (recognized && Array.isArray(recognized.charges)) ? recognized.charges : [];
+                recognizedTaxIds = (recognized && Array.isArray(recognized.taxIds)) ? recognized.taxIds : [];
+                recognizedSubtotalBeforeVat = (recognized && recognized.subtotalBeforeVat != null) ? recognized.subtotalBeforeVat : null;
+                recognizedVatAmount = (recognized && recognized.vatAmount != null) ? recognized.vatAmount : null;
                 handwrittenNotesList = normalizeHandwrittenNotes(recognized && recognized.handwrittenNotes);
 
                 if (recognized) {
@@ -3437,12 +3526,14 @@
                 }
             }
 
+            const chargesToShow = (recognized && Array.isArray(recognized.charges) ? recognized.charges : null)
+                || (existingInvoice && Array.isArray(existingInvoice.charges) ? existingInvoice.charges : []);
             if (recognizedItemsList.length > 0) {
                 itemsDisplay.innerHTML = recognizedItemsList.map(it =>
                     `• <b>${esc(it.name)}</b> - כמות: ${esc(it.quantity || 1)}${it.price ? ' (' + it.price + ' ₪)' : ''}`
-                ).join('<br>');
+                ).join('<br>') + chargesHtml(chargesToShow);
             } else {
-                itemsDisplay.innerText = "לא זוהו פרטים בשרת.";
+                itemsDisplay.innerHTML = 'לא זוהו פרטים בשרת.' + chargesHtml(chargesToShow);
             }
 
             renderHandwrittenBox();
@@ -3470,7 +3561,7 @@
             scanMode = (inv.docType === 'income') ? 'income' : 'invoice';
             recognizedImageBase64 = null;
             currentScanMeta = null;
-            openInvoiceConfirmForm(null, inv);
+            openInvoiceConfirmForm(null, inv, itemsMismatchTotal(inv));
         };
 
 
@@ -3524,6 +3615,7 @@
             editCropInvoice = null;
             recognizedImageBase64 = null;
             recognizedItemsList = [];
+            recognizedChargesList = []; recognizedTaxIds = []; recognizedSubtotalBeforeVat = null; recognizedVatAmount = null;
             editingInvoiceId = null;
             pendingNewDocId = null;
             scanMode = 'invoice';
@@ -3606,6 +3698,10 @@
                     id: invoiceId, docType: isIncome ? 'income' : 'invoice', supplier, invoiceNumber, invoiceDate, amount, paymentMethod, notes, monthKey,
                     items: recognizedItemsList, handwrittenNotes: keptHandwrittenNotes()
                 };
+                if (recognizedChargesList.length) invData.charges = recognizedChargesList;
+                if (recognizedTaxIds.length) invData.taxIds = recognizedTaxIds;
+                if (recognizedSubtotalBeforeVat != null) invData.subtotalBeforeVat = recognizedSubtotalBeforeVat;
+                if (recognizedVatAmount != null) invData.vatAmount = recognizedVatAmount;
                 // סימון מקור: חשבונית שנשמרה אחרי שנפתחה מתיבת המייל (להדפסה לרואה חשבון)
                 if (pendingInboxItem) invData.source = pendingInboxItem.source || 'email';
                 const printInput = document.getElementById('invoicePrintStatus');
@@ -3676,6 +3772,7 @@
                 if (!moreSplitDocs) reopenInboxIfNeeded();
                 recognizedImageBase64 = null;
                 recognizedItemsList = [];
+                recognizedChargesList = []; recognizedTaxIds = []; recognizedSubtotalBeforeVat = null; recognizedVatAmount = null;
                 handwrittenNotesList = [];
                 editingInvoiceId = null;
                 editCropInvoice = null;

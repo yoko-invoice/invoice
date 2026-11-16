@@ -2392,7 +2392,7 @@
                     const showMismatch = itemsMismatchTotal(merged);
                     mismatchBox.classList.toggle('hidden', !showMismatch);
                     const det = showMismatch ? itemsMismatchDetail(merged) : '';
-                    mismatchBox.innerHTML = '⚠️ סכום הפריטים לא תואם לסכום הכולל - בדוק מול החשבונית.' + (det ? ' ' + esc(det) : '');
+                    mismatchBox.innerHTML = '⚠️ בדוק את הסכום מול החשבונית.' + (det ? '<details style="font-weight:normal;font-size:0.9em;margin-top:4px"><summary>פרטים נוספים</summary>' + esc(det) + '</details>' : '');
                 }
                 refreshDateHint(); refreshNumberHint();
                 refreshPriceAlerts(true);
@@ -2694,7 +2694,11 @@
             const prob = dateProblem(v);
             const probText = { future: 'התאריך עתידי', old: 'התאריך ישן מעל שנה', outside: 'התאריך מחוץ לחודש שנבחר' }[prob];
             if (probText) {
-                msgs.push(probText + ' - ייתכן בלבול בין 4 ל-6.');
+                if(prob==='outside') {
+                    const months=['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+                    const chosen=document.getElementById('invoiceMonthSelect')?.value||'';
+                    msgs.push('התאריך ב'+months[Number(v.slice(5,7))-1]+' '+v.slice(0,4)+'; החודש שנבחר הוא '+months[Number(chosen.slice(5,7))-1]+' '+chosen.slice(0,4)+'.');
+                } else msgs.push(probText+' - בדוק מול המקור.');
                 digitSwapSuggestions(v).forEach(c => { if (!sugg.includes(c)) sugg.push(c); });
             }
             if (!msgs.length) { el.innerHTML = ''; return; }
@@ -2803,10 +2807,18 @@
             const combinedNotice=document.getElementById('combinedScanNotice');
             if(!combinedNotice)return;
     const vm = currentScanMeta || {};
-            combinedNotice.textContent = (vm.learningChanges?.length?'⚠️ דוגמאות קודמות השפיעו על הקריאה: '+vm.learningChanges.map(c=>'נקרא '+(isValidIsoDate(c.before)?fmtIsoDate(c.before):({invoice:'חשבונית',delivery_note:'תעודת משלוח'}[c.before]||c.before))+'; הוצע '+(isValidIsoDate(c.after)?fmtIsoDate(c.after):({invoice:'חשבונית',delivery_note:'תעודת משלוח'}[c.after]||c.after))).join('; ')+'. בדוק מול המקור. ':'') + (vm.independentComplete ? 'בוצעה קריאת כותרת נפרדת לכל עמוד במסמך. שתי קריאות יכולות לטעות; יש לבדוק מול המקור.' : '⚠️ חסרה קריאת כותרת עצמאית בחלק מהעמודים. בדוק מספר, תאריך, סוג וזהות מול המקור.')
-                + (vm.idContractIncomplete ? ' ⚠️ קריאת האימות לא החזירה מזהי מנפיק עם תוויות במבנה הנדרש. אין אימות מלא.' : '')
-                + (vm.verificationConflicts?.length ? ' ⚠️ קריאות שונות: ' + vm.verificationConflicts.join('; ') : '')
-                + (!vm.handwritingReported ? ' בדיקת כתב יד לא דווחה במלואה.' : ' השרת דיווח על חיפוש כתב יד; ייתכן שהוחמצו הערות.');
+            const alerts=[];
+            if(!vm.independentComplete) alerts.push('האימות חלקי. בדוק מספר, תאריך וספק מול המקור.');
+            if(vm.idContractIncomplete || vm.verificationConflicts?.some(x=>/מזהי|תוויות|מנפיק|לקוח/.test(x))) alerts.push('בדוק את פרטי הספק והמזהים מול המקור.');
+            if(vm.learningChanges?.length) alerts.push('הוצע תיקון מתיקונים קודמים. בדוק אותו מול המקור.');
+            const detail=[vm.independentComplete?'בוצעה קריאת כותרת נפרדת לכל עמוד; זו אינה בדיקה נוספת של הסכום.':'קריאת הכותרת אינה מלאה בכל העמודים.',
+                vm.idContractIncomplete?'מזהי המנפיק לא התקבלו במבנה מלא.':'',
+                vm.verificationConflicts?.length?'קריאות שונות: '+vm.verificationConflicts.join('; '):'',
+                vm.learningChanges?.length?'תיקונים קודמים: '+vm.learningChanges.map(c=>String(c.before)+' → '+String(c.after)).join('; '):'',
+                vm.handwritingReported?'בוצע חיפוש כתב יד; ייתכן שהוחמצו הערות.':'בדיקת כתב יד לא דווחה במלואה.'];
+            combinedNotice.innerHTML='<div>'+esc(alerts.length?alerts.join(' '):'בדוק את הפרטים מול המקור לפני שמירה.')+'</div>'
+                +'<details style="margin-top:4px;font-size:0.9em"><summary>פרטים נוספים</summary><div>'+detail.filter(Boolean).map(esc).join('<br>')+'</div></details>';
+
         }
 
         // ---- פיצול קובץ רב-מסמכי ----
@@ -3562,7 +3574,7 @@
             if (mismatchBox) {
                 mismatchBox.classList.toggle('hidden', !itemsMismatch);
                 const det = itemsMismatch ? itemsMismatchDetail(recognized || existingInvoice) : '';
-                mismatchBox.innerHTML = '⚠️ סכום הפריטים לא תואם לסכום הכולל - בדוק מול החשבונית.' + (det ? ' ' + esc(det) : '');
+                mismatchBox.innerHTML = '⚠️ בדוק את הסכום מול החשבונית.' + (det ? '<details style="font-weight:normal;font-size:0.9em;margin-top:4px"><summary>פרטים נוספים</summary>' + esc(det) + '</details>' : '');
             }
 
             const isDeliveryMode = (scanMode === 'delivery');
@@ -3572,9 +3584,13 @@
             if (typeHintEl) {
                 typeHintEl.innerText = (!existingInvoice && autoDetectedDocType)
                     ? (autoDetectedDocType.conflict ? '⚠️ שתי קריאות נתנו סוג שונה - בדוק לפי הכותרת במסמך (חשבונית / תעודת משלוח).'
-                        : (autoDetectedDocType.sure ? 'זוהה אוטומטית - אפשר לשנות אם טעה.' : 'לא בטוח בזיהוי - בדוק שהסוג נכון.'))
+                        : (autoDetectedDocType.sure ? 'זוהה אוטומטית. אפשר לשנות.' : 'לא בטוח בזיהוי - בדוק שהסוג נכון.'))
                     : (existingInvoice ? 'אפשר להמיר בין חשבונית, תעודת משלוח והכנסה - בשמירה המסמך יעבור לרשימה המתאימה.' : '');
-                if (!existingInvoice && currentScanMeta && currentScanMeta.docTypeNote) typeHintEl.innerText += ' ' + currentScanMeta.docTypeNote;
+                let typeDetails=document.getElementById('docTypeDetails');
+                if(!typeDetails){typeDetails=document.createElement('details');typeDetails.id='docTypeDetails';typeDetails.style.cssText='font-size:0.8em;color:#666';typeHintEl.insertAdjacentElement('afterend',typeDetails);}
+                typeDetails.hidden=Boolean(existingInvoice||!currentScanMeta?.docTypeNote);
+                typeDetails.open=false;
+                typeDetails.innerHTML='<summary>פרטים נוספים</summary><div>'+esc(currentScanMeta?.docTypeNote||'')+'</div>';
                 typeHintEl.style.color = (!existingInvoice && autoDetectedDocType && (autoDetectedDocType.conflict || !autoDetectedDocType.sure)) ? '#b9770e' : '#16a085';
             }
             applyDocTypeUI();
@@ -3729,11 +3745,16 @@
             let manageLearning=document.getElementById('manageRecognitionLearning');
             if(!manageLearning){manageLearning=document.createElement('button');manageLearning.id='manageRecognitionLearning';manageLearning.type='button';manageLearning.textContent='ניהול תיקונים לזיהוי';manageLearning.style.cssText='font-size:0.8em;width:auto;margin:4px 0;';manageLearning.onclick=window.manageRecognitionExamples;taxLearnLabel.insertAdjacentElement('afterend',manageLearning);}
             taxLearnLabel.replaceChildren();
+            let learningDetails=document.getElementById('supplierLearningDetails');
+            if(!learningDetails){learningDetails=document.createElement('details');learningDetails.id='supplierLearningDetails';learningDetails.style.cssText='font-size:0.85em;margin:6px 0;color:#666';learningDetails.innerHTML='<summary>לזכור לפעם הבאה (לא חובה)</summary>';supplierSel.insertAdjacentElement('afterend',learningDetails);}
+            learningDetails.append(taxLearnLabel,manageLearning);
             const taxLearningAllowed=!existingInvoice && scanMode!=='income' && confirmedIssuerCandidates.length>0;
+            learningDetails.hidden=false; // ניהול תיקונים נשאר נגיש גם כשאין מזהה לשמירה
+            learningDetails.open=false;
             taxLearnLabel.style.display=taxLearningAllowed?'block':'none';
             if(taxLearningAllowed) {
                 const cb=document.createElement('input');cb.type='checkbox';cb.id='confirmSupplierTaxLearning';cb.style.cssText='width:16px;vertical-align:middle;margin-left:5px;';
-                taxLearnLabel.append(cb,document.createTextNode('בדקתי מול המקור: מזהי המנפיק '+confirmedIssuerCandidates.join(', ')+' שייכים לספק שבחרתי. לזכור לזיהוי הבא.'));
+                taxLearnLabel.append(cb,document.createTextNode('בדקתי מול המקור: המזהים '+confirmedIssuerCandidates.join(', ')+' שייכים לספק שבחרתי. לזכור לפעם הבאה (לא חובה לשמירה).'));
             }
             initialSupplierSelection = supplierSel.value;
             initialDateSelection = dateInput.value;

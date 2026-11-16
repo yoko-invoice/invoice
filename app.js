@@ -1832,6 +1832,7 @@
                     })();
                 }
 
+                if(splitScanState)splitScanState.savedAllSelected=selectedScanPages.every(x=>x!==false);
                 const splitSave = (splitScanState && pendingInboxItem)
                     ? { item: pendingInboxItem, group: splitScanState.groups[splitScanState.idx] } : null;
                 if (splitSave) {
@@ -1845,13 +1846,14 @@
                 } else {
                     await ackOrQueue(setDoc(doc(getInvoicesCollection(), noteId), data, { merge: true }), 20000, "שמירת התעודה");
                 }
+                rememberStandaloneSplitSave(noteId,{number:noteNumber,supplier,kind:'תעודת משלוח'});
                 if (navigator.onLine !== false) await learnSupplierAlias(supplier, supplierFeedback);
                 await learnCorrectionExample(learningRawAtSave,{docType:learningTypeChanged?'delivery_note':'',invoiceDate:learningDateChanged?noteDate:''},'delivery',noteId);
                 if (!isUpdate && amount >= 0) {
                     try { await updatePriceBook(supplier, items, noteDate, 'delivery_note'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
 
-                const moreSplitDocs = splitScanState && (splitScanState.idx + 1 < splitScanState.groups.length);
+                const moreSplitDocs = Boolean(splitScanState);
                 // בפיצול, פריט ההמתנה נסגר רק כשכל עמוד מקור בקובץ נשמר - לא סתם בסוף הסדרה
                 if (!moreSplitDocs) {
                     if (!splitScanState || splitAllPagesAccounted(pendingInboxItem, splitScanState)) {
@@ -1871,14 +1873,14 @@
                 pendingNewDocId = null;
                 scanMode = 'invoice';
                 if (!isUpdate) learnDateChoice(supplier, noteDate, scanMetaAtSave);
-                alert((isUpdate ? ((editingOriginalKind === 'invoice' || editingOriginalKind === 'income') ? "המסמך הומר לתעודת משלוח בהצלחה!" : "התעודה עודכנה בהצלחה!") : "התעודה נשמרה בהצלחה!") + (moreSplitDocs ? '\nממשיכים למסמך ' + (splitScanState.idx + 2) + ' מתוך ' + splitScanState.groups.length + '.' : ''));
+                alert((isUpdate ? ((editingOriginalKind === 'invoice' || editingOriginalKind === 'income') ? "המסמך הומר לתעודת משלוח בהצלחה!" : "התעודה עודכנה בהצלחה!") : "התעודה נשמרה בהצלחה!") + (moreSplitDocs ? '\nממשיכים בבדיקת המסמכים.' : ''));
                 if (monthKey !== selectedMonth) {
                     const monthEl = document.getElementById('invoiceMonthSelect');
                     if (monthEl) monthEl.value = monthKey;
                     customReportEdits = {};
                 }
                 loadInvoicesForMonth();
-                if (moreSplitDocs) { splitScanState.idx++; await presentSplitDocument(); }
+                if (moreSplitDocs) { await advanceSplitReview('saved'); }
                 return true;
             } catch (e) {
                 alert("שגיאה בשמירת התעודה: " + (e && e.message ? e.message : "שגיאה לא ידועה") + "\nניתן לנסות שוב.");
@@ -2954,23 +2956,7 @@
             return st.pages.map((_, i) => i + 1).filter(p => !owners[String(p)]);
         }
         // דילוג על מסמך שכבר נשמר: מתקדם למסמך הבא, ובסוף הסדרה סוגר את פריט התור
-        async function advanceSplitSkip() {
-            const st = splitScanState;
-            st.idx++;
-            if (st.idx < st.groups.length) { await presentSplitDocument(); return; }
-            const it = pendingInboxItem;
-            const st2 = splitScanState;
-            splitScanState = null;
-            document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
-            if (it && splitAllPagesAccounted(it, st2)) {
-                try { await setDoc(doc(inboxCol(), it.id), { status: 'approved', approvedAt: new Date().toISOString() }, { merge: true }); } catch (e) {}
-                pendingInboxItem = null;
-                showToast('כל המסמכים בקובץ כבר נשמרו - הפריט בתור נסגר.');
-            } else {
-                showToast('עמודים ' + splitUnaccountedPages(it, st2).join(', ') + ' עוד לא נשמרו - הפריט נשאר בתור ההמתנה.', 'err');
-            }
-            reopenInboxIfNeeded();
-        }
+        async function advanceSplitSkip() { await advanceSplitReview('saved'); }
         // פותח רשומה קיימת לעריכה מתוך סדרת הפיצול (במקום ליצור רשומה חדשה לאותם עמודים)
         async function openExistingForSplitEdit(invoiceId) {
             let inv = monthlyInvoices.find(i => i.id === invoiceId) || monthlyIncome.find(i => i.id === invoiceId)
@@ -2987,6 +2973,7 @@
             recognizedImageBase64 = null;
             currentScanMeta = null;
             openInvoiceConfirmForm(null, inv, itemsMismatchTotal(inv));
+            if(splitScanState){document.getElementById('confirmFormTitle').innerText+=' (מסמך '+(splitScanState.idx+1)+' מתוך '+splitScanState.groups.length+')';renderSplitNavigation();}
             return true;
         }
         function splitGroupParts(g, results) {
@@ -3054,21 +3041,165 @@
             });
         }
 
+        let splitNavigationBusy = false;
+        let restoringSplitDraft = false;
+        const splitDraftFields = ['invoiceSupplierSelect', 'invoiceNumberInput', 'invoiceDateInput', 'invoiceAmountInput', 'invoicePaymentMethodInput', 'invoiceNotesInput', 'invoicePrintStatus'];
+        function splitReviewState() {
+            const st=splitScanState;
+            if(st){st.reviewStatus ||= {};st.drafts ||= {};}
+            return st;
+        }
+        function captureSplitDraft() {
+            const st=splitReviewState();if(!st)return;
+            st.drafts[st.idx]={values:Object.fromEntries(splitDraftFields.map(id=>[id,document.getElementById(id)?.value||''])),state:JSON.parse(JSON.stringify({scanMode,autoDetectedDocType,currentScanMeta,currentScanPages,currentScanResults,recognizedPageCount,selectedScanPages,lockedScanPages,currentScanThumbs,recognizedImageBase64,recognizedItemsList,recognizedChargesList,recognizedTaxIds,recognizedSubtotalBeforeVat,recognizedVatAmount,handwrittenNotesList,lastAutoAmount,editingInvoiceId,editingOriginalKind,editCropInvoice,pendingNewDocId,correctionRawSnapshot,confirmedIssuerCandidates,lastRecognizedSupplierRaw,lastRecognizedTaxId,initialSupplierSelection,initialDateSelection,initialTypeSelection})),
+                displays:Object.fromEntries(['docTypeHint','supplierMatchHint','mismatchWarningBox','handwritingStatus'].map(id=>{const e=document.getElementById(id);return [id,{html:e?.innerHTML||'',style:e?.getAttribute('style')||'',className:e?.className||''}];}))};
+        }
+        function splitNavBusy(busy) {
+            document.querySelectorAll('#splitReviewNav button,#splitReviewEnd button').forEach(b=>b.disabled=busy);
+        }
+        function renderSplitNavigation() {
+            let box=document.getElementById('splitReviewNav');
+            if(!box){box=document.createElement('div');box.id='splitReviewNav';box.style.cssText='border:1px solid #ccd8e5;border-radius:8px;padding:8px;margin:10px 0;background:#f0f5fb;';document.getElementById('confirmFormTitle').insertAdjacentElement('afterend',box);}
+            box.hidden=!splitScanState;
+            if(!splitScanState)return;
+            const st=splitReviewState();
+            box.innerHTML='<div style="font-size:0.85em">מסמך '+(st.idx+1)+' מתוך '+st.groups.length+' · דילוג אינו שמירה</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" id="splitSkipNext" style="margin:0;background:#396b9b">דלג לבאה</button><button type="button" id="splitReviewList" style="margin:0;background:#647887">חזרה למסמכים</button></div><div style="font-size:0.75em;margin-top:5px">טיוטות זמינות רק במסך הפתוח. יציאה או רענון לא שומרים אותן.</div>';
+            box.querySelector('#splitSkipNext').onclick=()=>navigateSplitReview(false);
+            box.querySelector('#splitReviewList').onclick=()=>navigateSplitReview(true);
+            splitNavBusy(splitNavigationBusy);
+        }
+        async function navigateSplitReview(toList) {
+            if(splitNavigationBusy||!splitScanState)return;
+            splitNavigationBusy=true;splitNavBusy(true);
+            try{await scanPreviewPromise;captureSplitDraft();const st=splitReviewState();st.reviewStatus[st.idx]='deferred';
+                if(toList)showSplitReviewEnd();else await advanceSplitReview('deferred');
+            }finally{splitNavigationBusy=false;splitNavBusy(false);}
+        }
+        async function restoreSplitDraft(d) {
+            restoringSplitDraft=true;
+            try {
+                scanMode=d.state.scanMode;
+                autoDetectedDocType=d.state.autoDetectedDocType;
+                currentScanMeta=d.state.currentScanMeta;
+                currentScanPages=d.state.currentScanPages;
+                currentScanResults=d.state.currentScanResults;
+                recognizedPageCount=d.state.recognizedPageCount;
+                selectedScanPages=d.state.selectedScanPages;
+                lockedScanPages=d.state.lockedScanPages;
+                currentScanThumbs=d.state.currentScanThumbs;
+                recognizedImageBase64=d.state.recognizedImageBase64;
+                recognizedItemsList=d.state.recognizedItemsList;
+                recognizedChargesList=d.state.recognizedChargesList;
+                recognizedTaxIds=d.state.recognizedTaxIds;
+                recognizedSubtotalBeforeVat=d.state.recognizedSubtotalBeforeVat;
+                recognizedVatAmount=d.state.recognizedVatAmount;
+                handwrittenNotesList=d.state.handwrittenNotesList;
+                lastAutoAmount=d.state.lastAutoAmount;
+                editingInvoiceId=d.state.editingInvoiceId;
+                editingOriginalKind=d.state.editingOriginalKind;
+                editCropInvoice=d.state.editCropInvoice;
+                pendingNewDocId=d.state.pendingNewDocId;
+                correctionRawSnapshot=d.state.correctionRawSnapshot;
+                confirmedIssuerCandidates=d.state.confirmedIssuerCandidates;
+                lastRecognizedSupplierRaw=d.state.lastRecognizedSupplierRaw;
+                lastRecognizedTaxId=d.state.lastRecognizedTaxId;
+                initialSupplierSelection=d.state.initialSupplierSelection;
+                initialDateSelection=d.state.initialDateSelection;
+                initialTypeSelection=d.state.initialTypeSelection;
+                // Rebuild controls for this document, without supplier prompts or duplicate alerts.
+                const recognized={...correctionRawSnapshot,supplier:d.values.invoiceSupplierSelect,invoiceNumber:d.values.invoiceNumberInput,invoiceDate:d.values.invoiceDateInput,amount:Number(d.values.invoiceAmountInput),items:recognizedItemsList,charges:recognizedChargesList,taxIds:recognizedTaxIds,subtotalBeforeVat:recognizedSubtotalBeforeVat,vatAmount:recognizedVatAmount,handwrittenNotes:handwrittenNotesList};
+                const existing=editingInvoiceId?{...editCropInvoice,...recognized,id:editingInvoiceId,docType:scanMode==='delivery'?'delivery_note':scanMode}:null;
+                openInvoiceConfirmForm(recognized,existing,false);
+                scanMode=d.state.scanMode;
+                autoDetectedDocType=d.state.autoDetectedDocType;
+                currentScanMeta=d.state.currentScanMeta;
+                currentScanPages=d.state.currentScanPages;
+                currentScanResults=d.state.currentScanResults;
+                recognizedPageCount=d.state.recognizedPageCount;
+                selectedScanPages=d.state.selectedScanPages;
+                lockedScanPages=d.state.lockedScanPages;
+                currentScanThumbs=d.state.currentScanThumbs;
+                recognizedImageBase64=d.state.recognizedImageBase64;
+                recognizedItemsList=d.state.recognizedItemsList;
+                recognizedChargesList=d.state.recognizedChargesList;
+                recognizedTaxIds=d.state.recognizedTaxIds;
+                recognizedSubtotalBeforeVat=d.state.recognizedSubtotalBeforeVat;
+                recognizedVatAmount=d.state.recognizedVatAmount;
+                handwrittenNotesList=d.state.handwrittenNotesList;
+                lastAutoAmount=d.state.lastAutoAmount;
+                editingInvoiceId=d.state.editingInvoiceId;
+                editingOriginalKind=d.state.editingOriginalKind;
+                editCropInvoice=d.state.editCropInvoice;
+                pendingNewDocId=d.state.pendingNewDocId;
+                correctionRawSnapshot=d.state.correctionRawSnapshot;
+                confirmedIssuerCandidates=d.state.confirmedIssuerCandidates;
+                lastRecognizedSupplierRaw=d.state.lastRecognizedSupplierRaw;
+                lastRecognizedTaxId=d.state.lastRecognizedTaxId;
+                initialSupplierSelection=d.state.initialSupplierSelection;
+                initialDateSelection=d.state.initialDateSelection;
+                initialTypeSelection=d.state.initialTypeSelection;
+                applyDocTypeUI();renderSupplierSelect();
+                splitDraftFields.forEach(id=>{const e=document.getElementById(id);if(!e)return;const v=d.values[id];if(e.tagName==='SELECT' && v && !Array.from(e.options).some(o=>o.value===v)){const o=document.createElement('option');o.value=v;o.textContent=v;e.appendChild(o);}e.value=v;});
+                Object.entries(d.displays).forEach(([id,x])=>{const e=document.getElementById(id);if(e){e.innerHTML=x.html;e.className=x.className;e.setAttribute('style',x.style);}});
+                if(editingInvoiceId&&editCropInvoice)renderEditImageWrap(editCropInvoice);else renderScanPreviewWrap();
+                renderPageSelector();renderHandwrittenBox();refreshDateHint();refreshNumberHint();updateScanVerificationNotice();
+                const cb=document.getElementById('confirmSupplierTaxLearning');if(cb)cb.checked=false;
+                document.getElementById('confirmFormTitle').innerText+=' (מסמך '+(splitScanState.idx+1)+' מתוך '+splitScanState.groups.length+')';
+                scanPreviewPromise=Promise.resolve();renderSplitNavigation();
+            } finally {restoringSplitDraft=false;}
+        }
+        function rememberStandaloneSplitSave(id,meta) {
+            if(!splitScanState||pendingInboxItem)return;
+            const st=splitScanState;st.sessionOwners ||= {};st.sessionOwnersMeta ||= {};
+            splitSavedPageNumbers(st.groups[st.idx]).forEach(p=>st.sessionOwners[String(p)]=id);
+            st.sessionOwnersMeta[id]=meta;
+        }
+        async function advanceSplitReview(status) {
+            const st=splitReviewState();if(!st)return;
+            if(status==='saved'){
+                const owned=pendingInboxItem?.splitOwners||st.sessionOwners||{};
+                const complete=st.groups[st.idx].pageIdxs.every(p=>owned[String(p+1)]);
+                st.reviewStatus[st.idx]=complete?'saved':'deferred';
+                // A partial save must reopen from original page ownership, never a stale full-amount draft.
+                delete st.drafts[st.idx];
+            }else st.reviewStatus[st.idx]=status;
+            const next=st.groups.findIndex((_,i)=>i>st.idx&&!st.reviewStatus[i]);
+            if(next>=0){st.idx=next;await presentSplitDocument();}else showSplitReviewEnd();
+        }
+        function showSplitReviewEnd() {
+            const st=splitReviewState();if(!st)return;
+            document.getElementById('invoiceConfirmForm').classList.add('hidden');
+            document.getElementById('splitReviewEnd')?.remove();
+            const box=document.createElement('div');box.id='splitReviewEnd';box.style.cssText='position:fixed;inset:0;z-index:1001;background:#0008;display:flex;align-items:center;justify-content:center;padding:12px;direction:rtl';
+            const saved=Object.values(st.reviewStatus).filter(x=>x==='saved').length;
+            const remaining=st.groups.map((_,i)=>i).filter(i=>st.reviewStatus[i]!=='saved');
+            box.innerHTML='<div style="background:white;border-radius:12px;padding:16px;max-width:520px;width:100%;max-height:85vh;overflow:auto"><h3>בדיקת המסמכים</h3><p>'+saved+' מתוך '+st.groups.length+' מסמכים נשמרו. '+remaining.length+' מחכים לבדיקה.</p><div id="splitReturnChoices"></div><p style="font-size:0.85em">טיוטות זמינות רק כל עוד המסך פתוח. יציאה או רענון לא שומרים אותן. דילוג לא מאשר מסמך.</p><button type="button" id="splitReviewExit" style="background:#647887">'+(remaining.length?'סיים לעת עתה':'סיום')+'</button></div>';
+            remaining.forEach(i=>{const b=document.createElement('button');b.type='button';const info=splitGroupParts(st.groups[i],st.results);b.textContent='חזור לבדיקה: מסמך '+(i+1)+(info.num?' · '+info.num:'')+(st.reviewStatus[i]==='deferred'?' (דולג)':'');b.onclick=async()=>{if(splitNavigationBusy)return;splitNavigationBusy=true;splitNavBusy(true);try{box.remove();st.idx=i;await presentSplitDocument();}finally{splitNavigationBusy=false;splitNavBusy(false);}};box.querySelector('#splitReturnChoices').appendChild(b);});
+            box.querySelector('#splitReviewExit').onclick=async()=>{if(splitNavigationBusy)return;splitNavigationBusy=true;splitNavBusy(true);try{if(remaining.length&&!await appConfirm('יציאה תמחק את הטיוטות שלא נשמרו במסך הזה. '+(pendingInboxItem?'הקובץ המקורי יישאר בהמתנה; פתיחתו מחדש תפעיל זיהוי חדש.':'רשומות שכבר נשמרו לא יימחקו; תוצאות הזיהוי שלא נשמרו יאבדו.')+' לצאת?'))return;
+                if(!remaining.length&&pendingInboxItem&&splitAllPagesAccounted(pendingInboxItem,st)){await setDoc(doc(inboxCol(),pendingInboxItem.id),{status:'approved',approvedAt:new Date().toISOString()},{merge:true});}
+                box.remove();splitScanState=null;finishCancelInvoiceEntry();
+            }catch(e){alert('לא ניתן לסיים כרגע. המסמכים נשארו לבדיקה: '+e.message);}
+            finally{splitNavigationBusy=false;splitNavBusy(false);}};
+            document.body.appendChild(box);splitNavBusy(splitNavigationBusy);
+        }
+
         // פותח את מסך האישור של המסמך הנוכחי בסדרת הפיצול (בלי קריאות זיהוי חדשות - משתמש בתוצאות הקיימות)
         async function presentSplitDocument() {
             const st = splitScanState;
             if (!st) return;
+            const draft=splitReviewState().drafts[st.idx];
+            if(draft){await restoreSplitDraft(draft);return;}
             const g = st.groups[st.idx];
             // עמודים שכבר נשמרו בעבר (גם אם הזהות נערכה ביד): לא יוצרים רשומה כפולה.
             // המיפוי נשמר על פריט התור ולכן שורד ביטול/רענון.
             // מסמך שכולו שמור: מציעים עריכה של הרשומה הקיימת או דילוג.
             // מסמך מעורב (חלק שמור חלק לא): אין דילוג - עריכה של הקיימת, או המשך לשמירת העמודים החדשים בלבד.
-            const owners = (pendingInboxItem && pendingInboxItem.splitOwners) || {};
+            const owners = (pendingInboxItem && pendingInboxItem.splitOwners) || st.sessionOwners || {};
             const ownerOf = p => owners[String(p + 1)];
             const ownerIds = [...new Set(g.pageIdxs.map(ownerOf).filter(Boolean))];
             if (ownerIds.length) {
                 const first = ownerIds[0];
-                const meta = ((pendingInboxItem.splitOwnersMeta || {})[first]) || {};
+                const meta = (((pendingInboxItem?.splitOwnersMeta || st.sessionOwnersMeta) || {})[first]) || {};
                 const pagesText = g.pageIdxs.map(p => p + 1).join(', ');
                 const unowned = g.pageIdxs.filter(p => !ownerOf(p));
                 const what = (meta.number ? ' מספר ' + meta.number : '') + (meta.supplier ? ' של ' + meta.supplier : '');
@@ -3120,6 +3251,7 @@
             openInvoiceConfirmForm(parsed, null, itemsMismatchTotal(parsed));
             const formTitle = document.getElementById('confirmFormTitle');
             if (formTitle && st.groups.length > 1) formTitle.innerText += ' (מסמך ' + (st.idx + 1) + ' מתוך ' + st.groups.length + ')';
+            renderSplitNavigation();
         }
 
         // Keep exact scan-page geometry alongside its generated image until upload completes.
@@ -3565,6 +3697,7 @@
             correctionRawSnapshot = recognized ? JSON.parse(JSON.stringify(recognized)) : null;
             confirmedIssuerCandidates=globalThis.InvoiceLearning?InvoiceLearning.ids(recognized):[];
             const confirmForm = document.getElementById('invoiceConfirmForm');
+            if(!splitScanState)document.getElementById('splitReviewNav')?.setAttribute('hidden','');
             const imgWrap = document.getElementById('invoicePreviewImgWrap');
             const formTitle = document.getElementById('confirmFormTitle');
             const saveBtn = document.getElementById('saveInvoiceBtn');
@@ -3689,7 +3822,7 @@
                             ? `לא זוהה ספק ברשימה (נקרא: "${lastRecognizedSupplierRaw}"). בחר ספק - המערכת תזכור לפעם הבאה.`
                             : 'לא זוהה ספק. בחר ספק ידנית.';
                     }
-                    if (lastRecognizedSupplierRaw.trim()) setTimeout(() => offerAddNewSupplier(lastRecognizedSupplierRaw), 300);
+                    if (!restoringSplitDraft && lastRecognizedSupplierRaw.trim()) setTimeout(() => offerAddNewSupplier(lastRecognizedSupplierRaw), 300);
                 }
                 }
                 notesInput.value = '';
@@ -3832,11 +3965,12 @@
             if (saved) await printPagesBase64(pages);
         };
 
-        window.cancelInvoiceEntry = function() {
-            if (splitScanState) {
-                splitScanState = null;
-                showToast('הפיצול הופסק - הקובץ נשאר בתור ההמתנה ולא נסגר; המסמכים שעוד לא נשמרו מחכים לטיפול.', 'err');
-            }
+        window.cancelInvoiceEntry = async function() {
+            if(splitNavigationBusy)return;
+            if(splitScanState){await navigateSplitReview(true);return;}
+            finishCancelInvoiceEntry();
+        };
+        function finishCancelInvoiceEntry() {
             document.getElementById('invoiceConfirmForm').classList.add('hidden'); window.scrollTo(0, 0);
             editCropInvoice = null;
             recognizedImageBase64 = null;
@@ -3850,7 +3984,8 @@
             handwrittenNotesList = [];
             renderHandwrittenBox();
             reopenInboxIfNeeded();
-        };
+            renderSplitNavigation();
+        }
 
         function makeInvoiceId() {
             if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
@@ -3977,6 +4112,7 @@
                     })();
                 }
 
+                if(splitScanState)splitScanState.savedAllSelected=selectedScanPages.every(x=>x!==false);
                 const splitSave = (splitScanState && pendingInboxItem)
                     ? { item: pendingInboxItem, group: splitScanState.groups[splitScanState.idx] } : null;
                 if (splitSave) {
@@ -3995,12 +4131,13 @@
                         "שמירת החשבונית"
                     );
                 }
+                rememberStandaloneSplitSave(invoiceId,{number:invoiceNumber,supplier,kind:isIncome?'חשבונית הכנסה':'חשבונית'});
                 if (!isIncome && navigator.onLine !== false) await learnSupplierAlias(supplier, supplierFeedback);
                 await learnCorrectionExample(learningRawAtSave,{docType:learningTypeChanged?'invoice':'',invoiceDate:learningDateChanged?invoiceDate:''},isIncome?'income':'invoice',invoiceId);
                 if (!isIncome && !isUpdate && amount > 0) {
                     try { await updatePriceBook(supplier, recognizedItemsList, invoiceDate, 'invoice'); } catch (e) { console.warn("עדכון מחירון נכשל:", e); }
                 }
-                const moreSplitDocs = splitScanState && (splitScanState.idx + 1 < splitScanState.groups.length);
+                const moreSplitDocs = Boolean(splitScanState);
                 // בפיצול, פריט ההמתנה נסגר רק כשכל עמוד מקור בקובץ נשמר - לא סתם בסוף הסדרה
                 if (!moreSplitDocs) {
                     if (!splitScanState || splitAllPagesAccounted(pendingInboxItem, splitScanState)) {
@@ -4028,7 +4165,7 @@
                 else if (editingOriginalKind === 'income' && savedKind !== 'income') saveMsg = "חשבונית ההכנסה הומרה לחשבונית ספק בהצלחה!";
                 else if (editingOriginalKind !== 'income' && savedKind === 'income') saveMsg = "החשבונית הועברה לרשימת ההכנסות בהצלחה!";
                 else saveMsg = isIncome ? "חשבונית ההכנסה עודכנה בהצלחה!" : "החשבונית עודכנה בהצלחה!";
-                alert(saveMsg + (moreSplitDocs ? '\nממשיכים למסמך ' + (splitScanState.idx + 2) + ' מתוך ' + splitScanState.groups.length + '.' : ''));
+                alert(saveMsg + (moreSplitDocs ? '\nממשיכים בבדיקת המסמכים.' : ''));
                 scanMode = 'invoice';
                 if (monthKey !== selectedMonth) {
                     const monthEl = document.getElementById('invoiceMonthSelect');
@@ -4036,13 +4173,21 @@
                     customReportEdits = {};
                 }
                 loadInvoicesForMonth();
-                if (moreSplitDocs) { splitScanState.idx++; await presentSplitDocument(); }
+                if (moreSplitDocs) { await advanceSplitReview('saved'); }
                 return true;
             } catch(e) {
                 alert("שגיאה בשמירת החשבונית: " + (e && e.message ? e.message : "שגיאה לא ידועה") + "\nניתן לנסות שוב.");
             } finally {
                 if (saveBtn) { saveBtn.disabled = false; saveBtn.innerText = (isUpdate ? "עדכן " : "שמור ") + (isIncome ? "חשבונית הכנסה" : "חשבונית"); }
             }
+        };
+
+        const saveInvoiceEntryWithoutNavigationLock=window.saveInvoiceEntry;
+        window.saveInvoiceEntry=async function(){
+            if(splitNavigationBusy)return false;
+            splitNavigationBusy=true;splitNavBusy(true);
+            try{return await saveInvoiceEntryWithoutNavigationLock();}
+            finally{splitNavigationBusy=false;splitNavBusy(false);}
         };
 
         window.deleteInvoiceEntry = async function(invoiceId) {

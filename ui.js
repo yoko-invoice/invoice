@@ -14,6 +14,7 @@
         function remove() { clearTimeout(timer); if (t.parentNode) t.parentNode.removeChild(t); }
         t.onclick = remove;
         box().appendChild(t);
+        return t;
     };
     window.alert = function (msg) {
         var m = String(msg);
@@ -21,11 +22,28 @@
         var isOk = /בהצלחה|נשמר/.test(m);
         window.showToast(m, isErr ? 'err' : (isOk ? 'ok' : ''));
     };
+    let recognitionNoticeScope=null;
+    const recognitionDialogs=new Set();
+    window.beginRecognitionNotices=function(scope){
+        recognitionNoticeScope=scope;
+        recognitionDialogs.forEach(cancel=>cancel(false));
+        document.querySelectorAll('.recognition-notice').forEach(e=>e.remove());
+        document.querySelectorAll('.toast').forEach(e=>{if(/^(הזיהוי לא הושלם:|פירוט השגיאה:)/.test(e.textContent||''))e.remove();});
+    };
+    window.showRecognitionNotice=function(msg,scope){
+        if(scope!==recognitionNoticeScope)return;
+        const t=window.showToast(msg,'err');if(t){t.classList.add('recognition-notice');t.dataset.recognitionScope=String(scope);}
+    };
+    window.recognitionConfirm=function(msg,scope){
+        if(scope!==recognitionNoticeScope)return Promise.resolve(false);
+        return dialog(msg,{recognitionScope:scope},false);
+    };
     function dialog(msg, opts, withInput, def) {
         opts = opts || {};
         return new Promise(function (resolve) {
             var ov = document.createElement('div');
             ov.id = 'dlgOverlay';
+            if(opts.recognitionScope!==undefined){ov.classList.add('recognition-notice');ov.dataset.recognitionScope=String(opts.recognitionScope);}
             var d = document.createElement('div'); d.className = 'dlg';
             var m = document.createElement('div'); m.className = 'dlg-msg'; m.textContent = String(msg);
             d.appendChild(m);
@@ -40,7 +58,8 @@
             var row = document.createElement('div'); row.className = 'dlg-btns';
             var ok = document.createElement('button'); ok.textContent = opts.ok || 'אישור'; ok.style.backgroundColor = '#1877f2';
             var no = document.createElement('button'); no.textContent = opts.cancel || 'ביטול'; no.style.backgroundColor = '#7f8c8d';
-            function done(v) { if (ov.parentNode) ov.parentNode.removeChild(ov); resolve(v); }
+            function done(v) { recognitionDialogs.delete(done);if (ov.parentNode) ov.parentNode.removeChild(ov); resolve(v); }
+            if(opts.recognitionScope!==undefined)recognitionDialogs.add(done);
             ok.onclick = function () { done(withInput ? inp.value : true); };
             no.onclick = function () { done(withInput ? null : false); };
             if (inp) inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') ok.click(); });

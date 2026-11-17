@@ -398,6 +398,45 @@
             return (el && el.value) ? el.value : getCurrentMonthKey();
         }
 
+        // One owner from the first async preparation step through review. No implicit retries.
+        let recognitionFlow=null, recognitionSequence=0, cameraRecognitionFlow=null;
+        function recognitionReviewOpen(){
+            return Boolean(splitScanState || document.getElementById('splitReviewEnd') || !document.getElementById('invoiceConfirmForm')?.classList.contains('hidden'));
+        }
+        function recognitionCurrent(flow){return Boolean(flow && recognitionFlow===flow);}
+        function recognitionBusy(){return recognitionFlow?.phase==='busy';}
+        function beginRecognitionFlow(append=false){
+            if(recognitionBusy() || splitNavigationBusy || (recognitionReviewOpen()&&!append) || (append&&!recognitionReviewOpen())){
+                document.querySelectorAll('.recognition-block-notice').forEach(e=>e.remove());
+                const notice=showToast(recognitionBusy()?'זיהוי כבר בתהליך. אין צורך ללחוץ שוב.':'יש בדיקה פתוחה. סיים אותה או צא ממנה לפני פתיחת קובץ אחר.');
+                if(notice){notice.classList.add('recognition-notice','recognition-block-notice');}
+                return null;
+            }
+            const flow={id:++recognitionSequence,phase:'busy',append};recognitionFlow=flow;
+            window.beginRecognitionNotices?.(flow.id);
+            setRecognitionControlsDisabled(true);return flow;
+        }
+        function settleRecognitionFlow(flow){
+            if(!recognitionCurrent(flow))return;
+            document.querySelectorAll('.recognition-block-notice').forEach(e=>e.remove());
+            flow.phase=recognitionReviewOpen()?'review':'idle';
+            if(flow.phase==='idle')recognitionFlow=null;
+            setRecognitionControlsDisabled(false);
+        }
+        function releaseRecognitionReview(){
+            if(recognitionBusy())return;
+            recognitionFlow=null;document.querySelectorAll('.recognition-block-notice').forEach(e=>e.remove());setRecognitionControlsDisabled(false);
+        }
+        async function runRecognitionFlow(append,flow,action){
+            const owner=!flow;
+            if(flow && (!recognitionCurrent(flow)||flow.phase!=='busy'))return;
+            flow ||= beginRecognitionFlow(append);if(!flow)return;
+            try{return await action(flow);}finally{if(owner)settleRecognitionFlow(flow);}
+        }
+        function recognitionError(flow,message){
+            if(recognitionCurrent(flow)){if(window.showRecognitionNotice)window.showRecognitionNotice(message,flow.id);else alert(message);}
+        }
+
         // ---- מודאל מצלמה חיה (getUserMedia) ----
         let cameraStream = null;
         let cameraOpenGen = 0;   // מונה פתיחות - מונע דליפת מצלמה אם המשתמש ביטל בזמן שההרשאה עוד ממתינה
@@ -429,6 +468,8 @@
         }
 
         window.openCameraModal = async function(mode, keepPages, append) {
+            if(!keepPages){const flow=beginRecognitionFlow(Boolean(append));if(!flow)return;cameraRecognitionFlow=flow;}
+            else if(!recognitionCurrent(cameraRecognitionFlow))return;
             cameraMode = (mode === 'delivery') ? 'delivery' : 'invoice';
             scanMode = cameraMode;
             if (!keepPages) { cameraPages = []; appendingToScan = Boolean(append); }
@@ -438,8 +479,8 @@
             errorBox.classList.add('hidden');
             errorBox.innerText = '';
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                alert("הדפדפן/האפליקציה לא תומכים בגישה למצלמה. נסה להעלות תמונה במקום זאת.");
-                return;
+                recognitionError(cameraRecognitionFlow,"הדפדפן/האפליקציה לא תומכים בגישה למצלמה. נסה להעלות תמונה במקום זאת.");
+                settleRecognitionFlow(cameraRecognitionFlow);cameraRecognitionFlow=null;return;
             }
             // מילוי המסך לאורך — inline כדי שיעבוד גם אם app.css ישן/במטמון
             Object.assign(video.style, { width: '100%', height: 'auto', maxHeight: 'none', flex: '1 1 auto', minHeight: '0', objectFit: 'contain', background: '#000' });
@@ -510,7 +551,8 @@
             b.style.visibility = 'visible';
         }
 
-        window.closeCameraModal = function() {
+        window.closeCameraModal = function(preserveFlow=false) {
+            if(!preserveFlow){const flow=cameraRecognitionFlow;cameraRecognitionFlow=null;settleRecognitionFlow(flow);}
             cameraOpenGen++;   // מבטל פתיחה שעוד ממתינה להרשאה - הזרם ייסגר כשיגיע
             const tb = document.getElementById('cameraTorchBtn'); if (tb) { tb.onclick = null; tb.disabled = false; tb.style.opacity = ''; tb.style.visibility = 'hidden'; tb.textContent = '🔦 פנס'; }
             const overlay = document.getElementById('cameraModalOverlay');
@@ -750,7 +792,9 @@
             return out;
         }
 
-        window.capturePhotoFromCamera = async function() {
+        let cameraCaptureBusy=false;
+        window.capturePhotoFromCamera=async function(){if(cameraCaptureBusy||!recognitionCurrent(cameraRecognitionFlow))return;cameraCaptureBusy=true;try{return await capturePhotoOwned(cameraRecognitionFlow);}finally{cameraCaptureBusy=false;}};
+        async function capturePhotoOwned(flow) {
             const video = document.getElementById('cameraModalVideo');
             const canvas = document.getElementById('cameraModalCanvas');
             if (!video.videoWidth || !video.videoHeight) {
@@ -840,7 +884,8 @@
                 scanWork = fin;
             }
             const base64Data = scanWork.toDataURL('image/jpeg', UPLOAD_JPEG_QUALITY).split(',')[1];
-            closeCameraModal();
+            if(!recognitionCurrent(flow)||cameraRecognitionFlow!==flow)return;
+            closeCameraModal(true);
             cameraPages.push(base64Data);
             const canAddPage = cameraPages.length < MAX_SCAN_PAGES - (appendingToScan ? currentScanPages.length : 0);
             // אישור (ימין) = סיום עיבוד, ביטול (שמאל) = הוסף עמוד
@@ -851,8 +896,9 @@
             }
             const pagesToProcess = cameraPages;
             cameraPages = [];
-            if (appendingToScan) { appendingToScan = false; await addPagesToCurrentScan(pagesToProcess); }
-            else await processScanPages(pagesToProcess);
+            try{if(appendingToScan){appendingToScan=false;await addPagesToCurrentScan(pagesToProcess,flow);}
+                else await processScanPages(pagesToProcess,flow);
+            }finally{settleRecognitionFlow(flow);if(cameraRecognitionFlow===flow)cameraRecognitionFlow=null;}
         };
 
         // ---- חשבוניות שהגיעו מהמייל (טיוטות לאישור) ----
@@ -1015,7 +1061,7 @@
                     <div style="font-size:0.75em; color:#888;">מקור: ${esc(importedSourceLabel(it.source))} ${esc(it.account || '')}</div>
                     <div id="inboxDup_${esc(it.id)}" style="font-size:0.85em; color:#c0392b; font-weight:bold;"></div>
                     <div style="display:flex; gap:6px; margin-top:6px;">
-                        <button type="button" onclick="openInboxItem('${esc(it.id)}')" style="margin:0; padding:6px 10px; background:#27ae60;">פתח לבדיקה ושמירה</button>
+                        <button type="button" data-recognition-new ${recognitionBusy()||recognitionReviewOpen()?'disabled':''} onclick="openInboxItem('${esc(it.id)}')" style="margin:0; padding:6px 10px; background:#27ae60;">פתח לבדיקה ושמירה</button>
                         <button type="button" onclick="dismissInboxItem('${esc(it.id)}')" style="margin:0; padding:6px 10px; background:#95a5a6;">התעלם</button>
                     </div></div>`;
             }
@@ -1037,7 +1083,8 @@
             try { await setDoc(doc(inboxCol(), '_status'), { fails: { [id]: deleteField() } }, { merge: true }); }
             catch (e) { alert('הפעולה נכשלה, נסה שוב.'); }
         };
-        window.openInboxItem = async function(id) {
+        window.openInboxItem = async function(id){return runRecognitionFlow(false,null,flow=>openInboxItemOwned(id,flow));};
+        async function openInboxItemOwned(id,flow) {
             const it = inboxItems.find(x => x.id === id);
             if (!it) return;
             try {
@@ -1069,18 +1116,19 @@
                     for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
                     file = new File([u8], j.filename || 'invoice', { type: j.mime || 'application/octet-stream' });
                 }
+                if(!recognitionCurrent(flow))return;
                 pendingInboxItem = it;
                 returnToInboxAfterForm = true;
                 closeInboxModal();
                 window.scrollTo(0, 0);
                 const _dt = it.fields && it.fields.docType;
-                await handleScanFiles({ target: { files: [file] } }, _dt === 'delivery_note' ? 'delivery' : (_dt === 'income' ? 'income' : 'invoice'));
+                await handleScanFiles({ target: { files: [file] } }, _dt === 'delivery_note' ? 'delivery' : (_dt === 'income' ? 'income' : 'invoice'),flow);
             } catch (e) {
                 console.warn('open inbox item failed', e);
                 returnToInboxAfterForm = false;
                 pendingInboxItem = null;
                 openInboxModal();
-                alert("לא הצלחתי לפתוח את המסמך. נסה שוב.");
+                recognitionError(flow,"לא הצלחתי לפתוח את המסמך. נסה שוב.");
             }
         };
         // נקרא אחרי שמירה מוצלחת: מסמן את הפריט כטופל רק אם זה אכן המסמך שנפתח מהמייל
@@ -2213,7 +2261,8 @@
         }
 
         // מקבל קובץ אחד או יותר (תמונות ו/או PDF) - כל תמונה/עמוד נחשב עמוד של אותו מסמך
-        async function handleScanFiles(event, mode) {
+        async function handleScanFiles(event,mode,flow){return runRecognitionFlow(false,flow,owned=>handleScanFilesOwned(event,mode,owned));}
+        async function handleScanFilesOwned(event, mode, flow) {
             const files = Array.from(event.target.files || []);
             if (files.length === 0) return;
             scanMode = mode;
@@ -2233,7 +2282,7 @@
                     }
                 }
                 if (truncated) alert(`המסמך ארוך מ-${MAX_SCAN_PAGES} עמודים - נסרקו ${MAX_SCAN_PAGES} העמודים הראשונים בלבד.`);
-                await processScanPages(pages);
+                if(recognitionCurrent(flow))await processScanPages(pages,flow);
             } finally {
                 event.target.value = '';
             }
@@ -2325,7 +2374,8 @@
             openCameraModal(scanMode, false, true);
         };
 
-        async function addPagesToCurrentScan(newPages) {
+        async function addPagesToCurrentScan(newPages,flow){return runRecognitionFlow(true,flow,owned=>addPagesToCurrentScanOwned(newPages,owned));}
+        async function addPagesToCurrentScanOwned(newPages,flow) {
             if (!newPages || !newPages.length || currentScanPages.length === 0) return;
             const room = MAX_SCAN_PAGES - currentScanPages.length;
             if (room <= 0) { alert(`הגעת למקסימום של ${MAX_SCAN_PAGES} עמודים במסמך.`); return; }
@@ -2337,7 +2387,8 @@
             setRecognitionControlsDisabled(true);
             try {
                 recognizingEl.innerText = `⏳ מעבד ${newPages.length} עמודים נוספים בבקשה מאוחדת...`;
-                const newResults = await recognizePages(newPages);
+                const newResults = await recognizePages(newPages,flow);
+                if(!recognitionCurrent(flow))return;
                 const allPages = currentScanPages.concat(newPages);
                 const allResults = currentScanResults.concat(newResults);
                 const merged = mergePageResults(allResults);
@@ -2399,7 +2450,7 @@
                 refreshDateHint(); refreshNumberHint();
                 refreshPriceAlerts(true);
             } catch (err) {
-                alert("פירוט השגיאה: " + err.message);
+                recognitionError(flow,"פירוט השגיאה: " + err.message);
             } finally {
                 recognizingEl.innerText = recognizingEl.dataset.baseText;
                 recognizingEl.classList.add('hidden');
@@ -2407,7 +2458,8 @@
             }
         }
 
-        async function handleAddPageFiles(event) {
+        async function handleAddPageFiles(event){return runRecognitionFlow(true,null,flow=>handleAddPageFilesOwned(event,flow));}
+        async function handleAddPageFilesOwned(event,flow) {
             const files = Array.from(event.target.files || []);
             try {
                 if (!files.length) return;
@@ -2420,7 +2472,7 @@
                     if (isPdf) pages.push(...(await pdfFileToPagesBase64(file, left)).pages);
                     else pages.push(await fileToBase64(file));
                 }
-                await addPagesToCurrentScan(pages);
+                if(recognitionCurrent(flow))await addPagesToCurrentScan(pages,flow);
             } finally {
                 event.target.value = '';
             }
@@ -2432,9 +2484,13 @@
         const INVOICE_IMAGE_PROXY_URL = "https://invoiceimageproxy-vngzfxix3a-uc.a.run.app";
 
         function setRecognitionControlsDisabled(disabled) {
-            document.querySelectorAll('[data-recognition-trigger]').forEach(btn => btn.disabled = disabled);
+            const busy=recognitionBusy();
+            document.querySelectorAll('[data-recognition-trigger]').forEach(btn=>btn.disabled=busy || (recognitionReviewOpen()&&!btn.closest('#addPagesRow')));
+            document.querySelectorAll('[data-recognition-new]').forEach(btn=>btn.disabled=busy||recognitionReviewOpen());
             const fileInput = document.getElementById('fileUploadInput');
-            if (fileInput) fileInput.disabled = disabled;
+            if(fileInput)fileInput.disabled=busy||recognitionReviewOpen();
+            const addInput=document.getElementById('addPageFileInput');if(addInput)addInput.disabled=busy;
+            document.querySelectorAll('#saveInvoiceBtn,#saveAndPrintBtn,#printOnlyBtn,#splitReviewNav button,#splitReviewEnd button').forEach(btn=>{btn.disabled=busy||splitNavigationBusy;});
         }
 
         // בודק אם סכום הפריטים שזוהו רחוק מהסכום הכולל - סימן שה-AI כנראה פספס או המציא פרטים
@@ -2720,7 +2776,7 @@
 
         // One client request for all pages. No client retry, per-page fallback or header request.
         // This candidate expects two independent provider reads, capped at three server-side. Legacy server metadata remains explicitly unverified.
-        async function recognizePages(pages) {
+        async function recognizePages(pages,flow) {
             let idTok = '';
             await fbAuth.authStateReady();
             if (fbAuth.currentUser) idTok = await fbAuth.currentUser.getIdToken();
@@ -2737,6 +2793,7 @@
                 });
                 data = await response.json();
             } finally { clearTimeout(timer); }
+            if(!recognitionCurrent(flow))throw new Error('בקשה ישנה הסתיימה; התוצאה לא הוצגה.');
             if (!response.ok || data.error) throw new Error(data.error || `שגיאת שרת (${response.status})`);
             if (data.contractVersion !== 2 || !Array.isArray(data.results) || data.results.length !== pages.length
                 || data.results.some(r => !r || typeof r !== 'object' || Array.isArray(r))) {
@@ -2752,7 +2809,7 @@
                     + (missing.length ? ' עמודים שלא זוהו: ' + missing.join(', ') + '.' : '')
                     + (data.warning ? ' ' + String(data.warning) : '')
                     + ' לא יושלמו נתונים חסרים ולא יבוצע ניסיון זיהוי נוסף. להציג לסקירה?';
-                if (!await appConfirm(warning)) throw new Error('הסקירה בוטלה. לא בוצע ניסיון נוסף.');
+                if (!await (window.recognitionConfirm?window.recognitionConfirm(warning,flow.id):appConfirm(warning))) throw new Error('הסקירה בוטלה. לא בוצע ניסיון נוסף.');
             }
             return data.results;
         }
@@ -3069,7 +3126,7 @@
             splitNavBusy(splitNavigationBusy);
         }
         async function navigateSplitReview(toList) {
-            if(splitNavigationBusy||!splitScanState)return;
+            if(recognitionBusy()||splitNavigationBusy||!splitScanState)return;
             splitNavigationBusy=true;splitNavBusy(true);
             try{await scanPreviewPromise;captureSplitDraft();const st=splitReviewState();st.reviewStatus[st.idx]='deferred';
                 if(toList)showSplitReviewEnd();else await advanceSplitReview('deferred');
@@ -3292,7 +3349,8 @@
 
         // פונקציה משותפת: מקבלת רשימת עמודים (base64 בלי הפריפיקס data:) ושולחת כל עמוד לזיהוי AI
         // דרך ה-Cloud Function, ואז מאחדת. משמשת גם חשבוניות וגם תעודות משלוח (לפי scanMode).
-        async function processScanPages(pages) {
+        async function processScanPages(pages,flow){return runRecognitionFlow(false,flow,owned=>processScanPagesOwned(pages,owned));}
+        async function processScanPagesOwned(pages,flow) {
             if (!RECOGNIZE_FUNCTION_URL || RECOGNIZE_FUNCTION_URL.includes('REGION-PROJECT')) {
                 alert("זיהוי חכם עדיין לא מחובר: יש לפרוס את ה-Cloud Function ולעדכן את RECOGNIZE_FUNCTION_URL בקוד.");
                 return;
@@ -3316,7 +3374,8 @@
                 recognizedImageBase64 = await buildScanPreview(pages);
 
                 recognizingEl.innerText = `⏳ מעבד ${pages.length} עמודים בבקשה מאוחדת אחת...`;
-                const results = await recognizePages(pages);
+                const results = await recognizePages(pages,flow);
+                if(!recognitionCurrent(flow))return;
 
                 // פיצול: מספרי מסמך שונים בין העמודים = מסמכים נפרדים, כל אחד מאושר ונשמר בנפרד.
                 // כל עמוד שהזהות שלו לא נקראה (כל עמוד ללא מספר) פותח את מסך ההכרעה - אין שיוך שקט בשום צורה.
@@ -3368,7 +3427,8 @@
                 autoDetectedDocType = det;
                 openInvoiceConfirmForm(parsed, null, itemsMismatchTotal(parsed));
             } catch (err) {
-                alert('הזיהוי לא הושלם: ' + err.message + '\nלא בוצע ניסיון נוסף. אפשר למלא ידנית.');
+                if(!recognitionCurrent(flow))return;
+                recognitionError(flow,'הזיהוי לא הושלם: ' + err.message + '\nלא בוצע ניסיון נוסף. אפשר למלא ידנית.');
                 openInvoiceConfirmForm(null, null);
             } finally {
                 recognizingEl.innerText = recognizingEl.dataset.baseText;
@@ -3966,7 +4026,7 @@
         };
 
         window.cancelInvoiceEntry = async function() {
-            if(splitNavigationBusy)return;
+            if(recognitionBusy()||splitNavigationBusy)return;
             if(splitScanState){await navigateSplitReview(true);return;}
             finishCancelInvoiceEntry();
         };
@@ -3985,6 +4045,7 @@
             renderHandwrittenBox();
             reopenInboxIfNeeded();
             renderSplitNavigation();
+            releaseRecognitionReview();
         }
 
         function makeInvoiceId() {
@@ -4184,10 +4245,10 @@
 
         const saveInvoiceEntryWithoutNavigationLock=window.saveInvoiceEntry;
         window.saveInvoiceEntry=async function(){
-            if(splitNavigationBusy)return false;
+            if(recognitionBusy()||splitNavigationBusy)return false;
             splitNavigationBusy=true;splitNavBusy(true);
             try{return await saveInvoiceEntryWithoutNavigationLock();}
-            finally{splitNavigationBusy=false;splitNavBusy(false);}
+            finally{splitNavigationBusy=false;splitNavBusy(false);if(!recognitionReviewOpen())releaseRecognitionReview();}
         };
 
         window.deleteInvoiceEntry = async function(invoiceId) {

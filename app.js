@@ -2808,8 +2808,8 @@
                 const warning = '⚠️ תוצאת הזיהוי דורשת בדיקה ידנית.'
                     + (missing.length ? ' עמודים שלא זוהו: ' + missing.join(', ') + '.' : '')
                     + (data.warning ? ' ' + String(data.warning) : '')
-                    + ' לא יושלמו נתונים חסרים ולא יבוצע ניסיון זיהוי נוסף. להציג לסקירה?';
-                if (!await (window.recognitionConfirm?window.recognitionConfirm(warning,flow.id):appConfirm(warning))) throw new Error('הסקירה בוטלה. לא בוצע ניסיון נוסף.');
+                    + ' לא יושלמו נתונים חסרים ולא יבוצע ניסיון זיהוי נוסף.';
+                data.results.forEach(r => { r._reviewWarnings = [warning]; });
             }
             return data.results;
         }
@@ -2839,6 +2839,7 @@
                 if (r.idAmbiguous) merged.idAmbiguous = true;
             });
             const verifications = results.flatMap(r => r && r._pageVerifications || (r ? [r.verification || {status:'unavailable',header:null,conflicts:[]}] : []));
+            merged._reviewWarnings = [...new Set(results.flatMap(r => r?._reviewWarnings || []))];
             merged._pageVerifications = verifications;
             merged._learningChanges=results.flatMap(r=>r?.learning?.changes||[]);
             const headers = verifications.map(v=>v.header).filter(Boolean);
@@ -2854,6 +2855,7 @@
         function scanVerificationMeta(parsed, meta) {
             const all=parsed._pageVerifications || [parsed.verification || {status:'unavailable',conflicts:[]}];
             meta.learningChanges=(parsed.learning?.changes||[]).concat(parsed._learningChanges||[]);
+            meta.reviewWarnings=parsed._reviewWarnings || [];
             meta.pageVerifications=all;
             meta.independentComplete=all.length>0 && all.every(v=>(v.status==='compared'||v.status==='conflict')&&v.coverageComplete!==false);
             meta.handwritingReported=parsed.handwritingCheck?.status==='reported';
@@ -2866,7 +2868,7 @@
             const combinedNotice=document.getElementById('combinedScanNotice');
             if(!combinedNotice)return;
     const vm = currentScanMeta || {};
-            const alerts=[];
+            const alerts=[...(vm.reviewWarnings || [])];
             if(!vm.independentComplete) alerts.push('האימות חלקי. בדוק מספר, תאריך וספק מול המקור.');
             if(vm.idContractIncomplete || vm.verificationConflicts?.some(x=>/מזהי|תוויות|מנפיק|לקוח/.test(x))) alerts.push('בדוק את פרטי הספק והמזהים מול המקור.');
             if(vm.learningChanges?.length) alerts.push('הוצע תיקון מתיקונים קודמים. בדוק אותו מול המקור.');
@@ -3121,6 +3123,14 @@
             if(!splitScanState)return;
             const st=splitReviewState();
             box.innerHTML='<div style="font-size:0.85em">מסמך '+(st.idx+1)+' מתוך '+st.groups.length+' · דילוג אינו שמירה</div><div style="display:flex;gap:6px;margin-top:6px"><button type="button" id="splitSkipNext" style="margin:0;background:#396b9b">דלג לבאה</button><button type="button" id="splitReviewList" style="margin:0;background:#647887">חזרה למסמכים</button></div><div style="font-size:0.75em;margin-top:5px">טיוטות זמינות רק במסך הפתוח. יציאה או רענון לא שומרים אותן.</div>';
+            const grouping=document.createElement('details');grouping.id='splitGroupingDetails';grouping.style.cssText='margin-top:8px;font-size:0.85em';
+            const summary=document.createElement('summary');summary.textContent='פירוט המסמכים והעמודים בקובץ';grouping.appendChild(summary);
+            st.groups.forEach((g,i)=>{const p=splitGroupParts(g,st.results);const row=document.createElement('div');row.style.marginTop='6px';
+                row.appendChild(document.createTextNode((i+1)+'. '+p.kind+(p.num?' מספר '+p.num:'')+(p.sup?', '+p.sup:'')));
+                if(p.amount!==null){row.appendChild(document.createTextNode(', '));const amount=document.createElement('bdi');amount.dir='ltr';amount.textContent=p.amount+' ₪';row.appendChild(amount);}
+                const pages=document.createElement('div');pages.style.cssText='font-size:0.9em;color:#555';pages.textContent='עמודים: '+p.pages.join(', ');row.appendChild(pages);grouping.appendChild(row);
+            });
+            box.appendChild(grouping);
             box.querySelector('#splitSkipNext').onclick=()=>navigateSplitReview(false);
             box.querySelector('#splitReviewList').onclick=()=>navigateSplitReview(true);
             splitNavBusy(splitNavigationBusy);
@@ -3202,6 +3212,7 @@
                 renderPageSelector();renderHandwrittenBox();refreshDateHint();refreshNumberHint();updateScanVerificationNotice();
                 const cb=document.getElementById('confirmSupplierTaxLearning');if(cb)cb.checked=false;
                 document.getElementById('confirmFormTitle').innerText+=' (מסמך '+(splitScanState.idx+1)+' מתוך '+splitScanState.groups.length+')';
+                renderScanSupplierAction(Boolean(editingInvoiceId));
                 scanPreviewPromise=Promise.resolve();renderSplitNavigation();
             } finally {restoringSplitDraft=false;}
         }
@@ -3382,7 +3393,7 @@
                 const splitInfo = (pages.length > 1) ? groupScanPages(results) : null;
                 const splitNeeded = splitInfo && (splitInfo.groups.length > 1 || splitInfo.ambiguous.length > 0);
                 if (splitNeeded) {
-                    const decidedGroups = await showSplitSummary(results, splitInfo);
+                    const decidedGroups = splitInfo.ambiguous.length ? await showSplitSummary(results, splitInfo) : splitInfo.groups;
                     if (decidedGroups) {
                         splitScanState = { groups: decidedGroups, pages: pages.slice(), results: results.slice(), idx: 0 };
                         await presentSplitDocument();
@@ -3882,7 +3893,6 @@
                             ? `לא זוהה ספק ברשימה (נקרא: "${lastRecognizedSupplierRaw}"). בחר ספק - המערכת תזכור לפעם הבאה.`
                             : 'לא זוהה ספק. בחר ספק ידנית.';
                     }
-                    if (!restoringSplitDraft && lastRecognizedSupplierRaw.trim()) setTimeout(() => offerAddNewSupplier(lastRecognizedSupplierRaw), 300);
                 }
                 }
                 notesInput.value = '';
@@ -3969,9 +3979,17 @@
                 else if (!handwrittenNotesList.length) hwStatus.innerHTML = '<span style="color:#999;">לא זוהה כתב יד במסמך.</span>';
                 else hwStatus.innerHTML = '';
             }
+            renderScanSupplierAction(Boolean(existingInvoice));
             refreshPriceAlerts(!existingInvoice);
             confirmForm.classList.remove('hidden');
             confirmForm.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function renderScanSupplierAction(existing) {
+            let addSupplierBtn=document.getElementById('scanAddSupplierBtn');
+            if(!addSupplierBtn){addSupplierBtn=document.createElement('button');addSupplierBtn.id='scanAddSupplierBtn';addSupplierBtn.type='button';addSupplierBtn.textContent='בחר / הוסף ספק חדש';addSupplierBtn.style.cssText='margin:6px 0;font-size:0.85em;background:#647887';document.getElementById('supplierMatchHint').insertAdjacentElement('afterend',addSupplierBtn);}
+            addSupplierBtn.hidden=existing||scanMode==='income'||!lastRecognizedSupplierRaw.trim()||Boolean(document.getElementById('invoiceSupplierSelect').value && document.getElementById('invoiceSupplierSelect').value!=='__other__');
+            addSupplierBtn.onclick=async()=>{if(recognitionBusy())return;addSupplierBtn.disabled=true;try{await offerAddNewSupplier(lastRecognizedSupplierRaw);if(document.getElementById('invoiceSupplierSelect').value)addSupplierBtn.hidden=true;}finally{addSupplierBtn.disabled=false;}};
         }
 
         window.editInvoiceEntry = function(invoiceId) {

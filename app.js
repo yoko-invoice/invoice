@@ -18,14 +18,63 @@
         function readInvoiceAmount() {
             return parseInvoiceAmountValue(document.getElementById('invoiceAmountInput').value);
         }
+
+        // מצב הזנת זיכוי: הסימון מאפשר להזין את הסכום החיובי כפי שמופיע במסמך.
+        // האחסון נשאר חתום (סכום < 0 = זיכוי) כדי שהדוחות, הסיכומים, הייצוא וההדפסות לא ישתנו.
+        function isCreditModeOn() {
+            const cb = document.getElementById('creditModeToggle');
+            return Boolean(cb && cb.checked) && scanMode !== 'delivery';
+        }
+        function readEffectiveInvoiceAmount() {
+            const v = readInvoiceAmount();
+            if (!Number.isFinite(v)) return v;
+            return isCreditModeOn() ? -Math.abs(v) : v;
+        }
+        function setCreditMode(on) {
+            const cb = document.getElementById('creditModeToggle');
+            if (!cb) return;
+            cb.checked = Boolean(on) && scanMode !== 'delivery';
+            updateCreditModeUI();
+        }
+        function updateCreditModeUI() {
+            const wrap = document.getElementById('creditModeWrap');
+            const cb = document.getElementById('creditModeToggle');
+            const hint = document.getElementById('creditModeHint');
+            const label = document.getElementById('amountLabel');
+            const isDelivery = scanMode === 'delivery';
+            if (isDelivery && cb) cb.checked = false;
+            if (wrap) wrap.classList.toggle('hidden', isDelivery);
+            const on = Boolean(cb && cb.checked) && !isDelivery;
+            if (hint) hint.innerText = on ? 'הסכום יישמר כזיכוי (סכום שלילי). אין צורך להזין מינוס.' : '';
+            if (label && !isDelivery) {
+                label.innerText = on ? 'סכום הזיכוי (₪) - כפי שמופיע במסמך:' : (scanMode === 'income' ? 'סכום החשבונית (₪):' : 'סכום לתשלום (₪):');
+            }
+        }
+        window.onCreditModeChange = function() {
+            const cb = document.getElementById('creditModeToggle');
+            const input = document.getElementById('invoiceAmountInput');
+            // סימון זיכוי כשהשדה כבר מכיל מינוס: מציגים את הערך המוחלט - הסימון עצמו מספיק.
+            if (cb && cb.checked && input) {
+                const v = parseInvoiceAmountValue(input.value);
+                if (Number.isFinite(v) && v < 0) input.value = String(Math.abs(v));
+            }
+            updateCreditModeUI();
+        };
         function warnInvalidInvoiceAmount() {
             const input = document.getElementById('invoiceAmountInput');
             const amount = parseInvoiceAmountValue(input.value);
+            const credit = isCreditModeOn();
             const message = !input.value.trim()
-                ? '⚠️ לא הוזן סכום. הזן סכום לתשלום, או סכום שלילי לזיכוי (למשל ‎-100.00).'
+                ? (credit
+                    ? '⚠️ לא הוזן סכום. הזן את סכום הזיכוי כפי שמופיע במסמך (למשל 100.00) - הוא יישמר כסכום שלילי.'
+                    : '⚠️ לא הוזן סכום. הזן סכום לתשלום, או סכום שלילי לזיכוי (למשל ‎-100.00).')
                 : amount === 0
-                    ? '⚠️ סכום החשבונית לא יכול להיות 0. לזיכוי יש להזין סכום שלילי.'
-                    : '⚠️ הסכום לא נקלט כמספר תקין. הזן ספרות, נקודה או פסיק עשרוני, ומינוס אחד בתחילת הסכום לזיכוי (למשל ‎-100.00). אין להזין מפרידי אלפים.';
+                    ? (credit
+                        ? '⚠️ סכום הזיכוי לא יכול להיות 0.'
+                        : '⚠️ סכום החשבונית לא יכול להיות 0. לזיכוי יש להזין סכום שלילי.')
+                    : (credit
+                        ? '⚠️ הסכום לא נקלט כמספר תקין. הזן ספרות ונקודה או פסיק עשרוני (למשל 100.00). אין להזין מפרידי אלפים.'
+                        : '⚠️ הסכום לא נקלט כמספר תקין. הזן ספרות, נקודה או פסיק עשרוני, ומינוס אחד בתחילת הסכום לזיכוי (למשל ‎-100.00). אין להזין מפרידי אלפים.');
             alert(message);
             input.focus();
             return false;
@@ -1363,7 +1412,7 @@
             const base=learningIssuerData(raw._learningOriginal || raw,role);
             const e=InvoiceLearning.example({raw:base,final,role,restaurant:RESTAURANT_ID,sourceId,confirmed:true});
             if(!e)return;
-            e.sourceDisplay={number:document.getElementById('invoiceNumberInput').value.trim(),date:final.invoiceDate||document.getElementById('invoiceDateInput').value,kind:role==='delivery'?'תעודת משלוח':(readInvoiceAmount()<0?'חשבונית זיכוי':'חשבונית'),source:pendingInboxItem?.source==='email'?'דואר אלקטרוני':'העלאה או צילום'};
+            e.sourceDisplay={number:document.getElementById('invoiceNumberInput').value.trim(),date:final.invoiceDate||document.getElementById('invoiceDateInput').value,kind:role==='delivery'?'תעודת משלוח':(readEffectiveInvoiceAmount()<0?'חשבונית זיכוי':'חשבונית'),source:pendingInboxItem?.source==='email'?'דואר אלקטרוני':'העלאה או צילום'};
             try {
                 await runTransaction(db,async tx=>{
                     const ref=getSettingsDoc('recognition_examples');const snap=await tx.get(ref);
@@ -1506,6 +1555,7 @@
                 if (formTitle) formTitle.innerText = 'עריכת ' + kindName + ' קיימת';
                 if (saveBtn) saveBtn.innerText = 'עדכן ' + kindName;
             }
+            updateCreditModeUI();
         }
 
         window.onDocTypeChange = function() {
@@ -1782,7 +1832,7 @@
             const supplierEl = document.getElementById('invoiceSupplierSelect');
             const supplier = supplierEl ? supplierEl.value : '';
             if (!supplier || supplier === '__other__' || recognizedItemsList.length === 0) return;
-            const amount = readInvoiceAmount();
+            const amount = readEffectiveInvoiceAmount();
             if (amount < 0) return; // זיכוי/החזרה - לא בודקים עליית מחיר
             const date = (document.getElementById('invoiceDateInput').value || '').trim();
 
@@ -2478,8 +2528,9 @@
 
                 // סכום: מתעדכן רק אם המשתמש לא שינה אותו ידנית
                 const amountInput = document.getElementById('invoiceAmountInput');
-                if (typeof merged.amount === 'number' && (amountInput.value === '' || parseInvoiceAmountValue(amountInput.value) === lastAutoAmount)) {
-                    amountInput.value = merged.amount;
+                if (typeof merged.amount === 'number' && (amountInput.value === '' || readEffectiveInvoiceAmount() === lastAutoAmount)) {
+                    setCreditMode(merged.amount < 0);
+                    amountInput.value = merged.amount < 0 ? String(Math.abs(merged.amount)) : String(merged.amount);
                     lastAutoAmount = merged.amount;
                 }
                 // שדות כותרת: ממלאים רק ריקים
@@ -3172,7 +3223,7 @@
         }
         function captureSplitDraft() {
             const st=splitReviewState();if(!st)return;
-            st.drafts[st.idx]={values:Object.fromEntries(splitDraftFields.map(id=>[id,document.getElementById(id)?.value||''])),state:JSON.parse(JSON.stringify({scanMode,autoDetectedDocType,currentScanMeta,currentScanPages,currentScanResults,recognizedPageCount,selectedScanPages,lockedScanPages,currentScanThumbs,recognizedImageBase64,recognizedItemsList,recognizedChargesList,recognizedTaxIds,recognizedSubtotalBeforeVat,recognizedVatAmount,handwrittenNotesList,lastAutoAmount,editingInvoiceId,editingOriginalKind,editCropInvoice,pendingNewDocId,correctionRawSnapshot,confirmedIssuerCandidates,lastRecognizedSupplierRaw,lastRecognizedTaxId,initialSupplierSelection,initialDateSelection,initialTypeSelection})),
+            st.drafts[st.idx]={creditMode:Boolean(document.getElementById('creditModeToggle')?.checked),values:Object.fromEntries(splitDraftFields.map(id=>[id,document.getElementById(id)?.value||''])),state:JSON.parse(JSON.stringify({scanMode,autoDetectedDocType,currentScanMeta,currentScanPages,currentScanResults,recognizedPageCount,selectedScanPages,lockedScanPages,currentScanThumbs,recognizedImageBase64,recognizedItemsList,recognizedChargesList,recognizedTaxIds,recognizedSubtotalBeforeVat,recognizedVatAmount,handwrittenNotesList,lastAutoAmount,editingInvoiceId,editingOriginalKind,editCropInvoice,pendingNewDocId,correctionRawSnapshot,confirmedIssuerCandidates,lastRecognizedSupplierRaw,lastRecognizedTaxId,initialSupplierSelection,initialDateSelection,initialTypeSelection})),
                 displays:Object.fromEntries(['docTypeHint','supplierMatchHint','mismatchWarningBox','handwritingStatus'].map(id=>{const e=document.getElementById(id);return [id,{html:e?.innerHTML||'',style:e?.getAttribute('style')||'',className:e?.className||''}];}))};
         }
         function splitNavBusy(busy) {
@@ -3239,6 +3290,7 @@
                 const recognized={...correctionRawSnapshot,supplier:d.values.invoiceSupplierSelect,invoiceNumber:d.values.invoiceNumberInput,invoiceDate:d.values.invoiceDateInput,amount:parseInvoiceAmountValue(d.values.invoiceAmountInput),items:recognizedItemsList,charges:recognizedChargesList,taxIds:recognizedTaxIds,subtotalBeforeVat:recognizedSubtotalBeforeVat,vatAmount:recognizedVatAmount,handwrittenNotes:handwrittenNotesList};
                 const existing=editingInvoiceId?{...editCropInvoice,...recognized,id:editingInvoiceId,docType:scanMode==='delivery'?'delivery_note':scanMode}:null;
                 openInvoiceConfirmForm(recognized,existing,false);
+                if (d.creditMode !== undefined) setCreditMode(d.creditMode === true);
                 scanMode=d.state.scanMode;
                 autoDetectedDocType=d.state.autoDetectedDocType;
                 currentScanMeta=d.state.currentScanMeta;
@@ -3904,7 +3956,10 @@
                 }
                 numberInput.value = existingInvoice.invoiceNumber || '';
                 if (dateInput) dateInput.value = existingInvoice.invoiceDate || '';
-                amountInput.value = existingInvoice.amount ?? '';
+                const existingAmountNum = Number(existingInvoice.amount);
+                const existingIsCredit = Number.isFinite(existingAmountNum) && existingAmountNum < 0;
+                setCreditMode(existingIsCredit);
+                amountInput.value = existingIsCredit ? String(Math.abs(existingAmountNum)) : (existingInvoice.amount ?? '');
                 paymentInput.value = existingInvoice.paymentMethod ?? '';
                 notesInput.value = (existingInvoice.notes === 'חשבונית זיכוי') ? '' : (existingInvoice.notes ?? '');
                 recognizedItemsList = existingInvoice.items || [];
@@ -3965,7 +4020,9 @@
                     const d = recognized && recognized.invoiceDate;
                     dateInput.value = (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(new Date(d).getTime())) ? d : '';
                 }
-                amountInput.value = (recognized && typeof recognized.amount === 'number') ? recognized.amount : '';
+                const recognizedAmountNum = (recognized && typeof recognized.amount === 'number') ? recognized.amount : null;
+                setCreditMode(recognizedAmountNum !== null && recognizedAmountNum < 0);
+                amountInput.value = recognizedAmountNum === null ? '' : String(recognizedAmountNum < 0 ? Math.abs(recognizedAmountNum) : recognizedAmountNum);
                 paymentInput.value = (recognized && recognized.paymentMethod) ? recognized.paymentMethod : '';
                 recognizedItemsList = (recognized && Array.isArray(recognized.items)) ? recognized.items : [];
                 recognizedChargesList = (recognized && Array.isArray(recognized.charges)) ? recognized.charges : [];
@@ -4166,7 +4223,7 @@
             const scanMetaAtSave = currentScanMeta ? {...currentScanMeta,userChanged:document.getElementById('invoiceDateInput').value !== initialDateSelection} : null;
 
             const invoiceNumber = document.getElementById('invoiceNumberInput').value.trim();
-            const amount = readInvoiceAmount();
+            const amount = readEffectiveInvoiceAmount();
             if (!Number.isFinite(amount) || amount === 0) return warnInvalidInvoiceAmount();
             const paymentMethod = document.getElementById('invoicePaymentMethodInput').value.trim();
             let notes = document.getElementById('invoiceNotesInput').value.trim();

@@ -68,11 +68,15 @@ window.fetch = async (url, opts) => {
   const u = String(url);
   if (u.includes('recognizeinvoice')) {
     const body = JSON.parse(opts.body);
-    if (body.headerOnly) return new Response(JSON.stringify({ result: {} }), { status: 200 });
-    const idx = window.__pageLen[String(body.image).length];
-    if (idx === undefined) return new Response(JSON.stringify({ error: 'unknown page image' }), { status: 400 });
-    window.__recogCalls.push(idx);
-    return new Response(JSON.stringify({ result: window.__canned[idx] }), { status: 200 });
+    // current protocol: one batched request, results aligned with body.images
+    const images = body.images || (body.image ? [body.image] : []);
+    const results = images.map(img => {
+      const idx = window.__pageLen[String(img).length];
+      if (idx === undefined) return { error: 'unknown page image' };
+      window.__recogCalls.push(idx);
+      return window.__canned[idx];
+    });
+    return new Response(JSON.stringify({ contractVersion: 2, results }), { status: 200 });
   }
   if (u.includes('invoiceinboxfile')) {
     const u8 = new Uint8Array(pdfResp.slice(0));
@@ -126,11 +130,27 @@ if (!__store.has('yoko_inbox/' + INBOX_ID)) __seed('yoko_inbox/' + INBOX_ID, {
   ...(scenario === 'emailsplit' ? {} : { originalPath: ORIGINAL_PATH }),
   filename: 'sample.pdf', mime: 'application/pdf', mailDate: new Date().toISOString(), fields: {}, printStatus: 'needed'
 });
+if (scenario === 'credit-edit') {
+  __seed('yoko_settings/suppliers_list', { suppliers: [SUP] });
+  __seed('yoko_invoices/existing_credit', {
+    id: 'existing_credit', docType: 'invoice', supplier: SUP, invoiceNumber: '352000',
+    invoiceDate: '2026-11-03', amount: -152, monthKey: '2026-11', items: [], paymentMethod: 'כרטיס אשראי'
+  });
+}
 if (scenario === 'dupblock' && !__store.has('yoko_invoices/existing_dup')) {
   __seed('yoko_invoices/existing_dup', {
     id: 'existing_dup', docType: 'invoice', supplier: SUP, invoiceNumber: '22889946',
     invoiceDate: '2026-11-02', amount: -80, monthKey: '2026-11', items: []
   });
+}
+
+// כל העמודים עם אותו מספר חשבונית -> מסמך יחיד בלי מסך פיצול
+function cannedSingle(num, isCredit, amt) {
+  window.__canned = [0, 1, 2, 3].map(() => ({
+    supplier: SUP, taxId: '515000001', invoiceNumber: num, invoiceDate: '2026-11-05',
+    isCredit, docType: 'invoice', amount: amt,
+    items: [{ name: 'item', quantity: 1, price: amt }], paymentMethod: 'כרטיס אשראי', handwrittenNotes: []
+  }));
 }
 
 // ---- flow helpers ----
@@ -141,6 +161,26 @@ async function openItemFromInbox() {
   btn.click();
 }
 async function waitSummary() { return waitFor(() => document.getElementById('splitSummaryOverlay'), 'split summary'); }
+// מאז 17.11 פיצול ברור (כל העמודים עם מספר) פותח ישר את המסמך הראשון בלי מסך סיכום
+async function maybeSummaryOk() {
+  const ov = await waitFor(() => document.getElementById('splitSummaryOverlay'), 'split summary', 4000).catch(() => null);
+  if (ov) { clickOkSummary(); await sleep(300); }
+  return ov;
+}
+// ביטול באמצע סדרת פיצול מעביר למסך סיום הבדיקה - יוצאים דרך "סיים לעת עתה" (אישור אובדן טיוטות)
+async function cancelSplitReview() {
+  [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+  await sleep(300);
+  const exitBtn = await waitFor(() => document.querySelector('#splitReviewEnd #splitReviewExit'), 'review exit on cancel', 4000).catch(() => null);
+  if (exitBtn) { exitBtn.click(); await sleep(300); }
+}
+
+// אחרי שמירת המסמך האחרון נפתח מסך סיום הבדיקה - הפריט נסגר רק בלחיצה על סיום
+async function finishSplitReview() {
+  const btn = await waitFor(() => document.querySelector('#splitReviewEnd #splitReviewExit'), 'review exit', 20000).catch(() => null);
+  if (btn) { btn.click(); await sleep(300); }
+  return btn;
+}
 function clickOkSummary() { document.querySelector('#splitSummaryOverlay #splitSummaryOk').click(); }
 async function waitDocForm(k, total) {
   await waitFor(() => formVisible() && formTitle().includes('מסמך ' + k + ' מתוך ' + total), 'doc form ' + k);
@@ -164,24 +204,22 @@ try {
 
   if (scenario === 'saveall') {
     await openItemFromInbox();
-    const ov = await waitSummary();
-    log('summary title 4 docs', ov.textContent.includes('זוהו 4 מסמכים נפרדים בקובץ'));
-    log('no ambiguity radios', !ov.querySelector('input[type=radio]'));
-    log('credit labels', (ov.textContent.match(/חשבונית זיכוי/g) || []).length === 3);
-    log('ltr amounts', (ov.innerHTML.match(/dir="ltr">-?\d+ ₪/g) || []).length === 4);
-    clickOkSummary();
+    await maybeSummaryOk();
     for (let k = 1; k <= 4; k++) {
       await waitDocForm(k, 4);
       const num = document.getElementById('invoiceNumberInput').value;
       const amt = parseFloat(document.getElementById('invoiceAmountInput').value);
+      const creditOn = document.getElementById('creditModeToggle').checked;
       log('doc' + k + ' number', num === NUMS[k - 1], num);
-      log('doc' + k + ' amount', amt === (k < 4 ? -AMTS[k - 1] : AMTS[k - 1]), String(amt));
+      log('doc' + k + ' amount', amt === AMTS[k - 1], String(amt));
+      log('doc' + k + ' credit toggle', creditOn === (k < 4), String(creditOn));
       fillSupplierAndSave();
       await waitSavedAlert(k);
       if (k < 4) {
         log('inbox still pending after doc' + k, inboxDoc() && inboxDoc().status === 'pending');
       }
     }
+    await finishSplitReview();
     await waitFor(() => inboxDoc() && inboxDoc().status === 'approved', 'inbox approved');
     const docs = invoiceDocs();
     log('4 invoice docs', docs.length === 4, docs.map(d => d.id).join(','));
@@ -194,9 +232,7 @@ try {
     // פריט מקור מהמייל (בלי originalPath): אותן הבטחות פיצול כמו פריט מכשיר -
     // בעלות-עמודים נכתבת אחרי כל שמירה, מזהים יציבים, והפריט נסגר כשכל העמודים נשמרו
     await openItemFromInbox();
-    const ov = await waitSummary();
-    log('summary title 4 docs', ov.textContent.includes('זוהו 4 מסמכים נפרדים בקובץ'));
-    clickOkSummary();
+    await maybeSummaryOk();
     for (let k = 1; k <= 4; k++) {
       await waitDocForm(k, 4);
       fillSupplierAndSave();
@@ -206,6 +242,7 @@ try {
         log('ownership written after doc' + k, !!(inboxDoc().splitOwners && inboxDoc().splitOwners[String(k)] === keyOf(NUMS[k - 1], SUP, k < 4 ? 'credit' : 'invoice')));
       }
     }
+    await finishSplitReview();
     await waitFor(() => inboxDoc() && inboxDoc().status === 'approved', 'inbox approved');
     log('inbox approved when complete', true);
     const docs = invoiceDocs();
@@ -240,7 +277,7 @@ try {
     log('doc1 saved with 2 pages merged', d1 && d1.pageCount === 2, d1 && String(d1.pageCount));
     await waitDocForm(2, 3);
     // cancel mid-split: queue must stay open
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
     await sleep(300);
     log('inbox pending after cancel', inboxDoc() && inboxDoc().status === 'pending');
     log('only doc1 saved', invoiceDocs().length === 1);
@@ -248,21 +285,19 @@ try {
 
   else if (scenario === 'cancel-resume') {
     await openItemFromInbox();
-    await waitSummary();
-    clickOkSummary();
+    await maybeSummaryOk();
     await waitDocForm(1, 4);
     fillSupplierAndSave();
     await waitSavedAlert(1);
     await waitDocForm(2, 4);
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
     await sleep(300);
     log('1 doc saved before cancel', invoiceDocs().length === 1);
     log('inbox pending after cancel', inboxDoc() && inboxDoc().status === 'pending');
     log('ownership persisted on queue item', inboxDoc().splitOwners && inboxDoc().splitOwners['1'] === keyOf('22889733', SUP, 'credit'));
     // resume: recognition runs again, but doc1 pages are owned -> offer edit, not a new record
     await openItemFromInbox();
-    await waitSummary();
-    clickOkSummary();
+    await maybeSummaryOk();
     window.__confirmScript = [{ match: 'כבר נשמר', answer: true }];
     await waitFor(() => formVisible(), 'edit form for owned doc');
     log('ownership edit confirm shown', window.__confirms.some(c => c.includes('כבר נשמר')));
@@ -273,13 +308,12 @@ try {
     log('resume update kept single record', docs.length === 1 && docs[0].id === keyOf('22889733', SUP, 'credit'), docs.map(d => d.id).join(','));
     log('second recognition round happened', window.__recogCalls.length === 8, String(window.__recogCalls.length));
     await waitDocForm(2, 4);
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
   }
 
   else if (scenario === 'dupblock') {
     await openItemFromInbox();
-    await waitSummary();
-    clickOkSummary();
+    await maybeSummaryOk();
     await waitDocForm(1, 4);
     fillSupplierAndSave();
     await waitSavedAlert(1);
@@ -292,13 +326,12 @@ try {
     log('blocked save left form open', formVisible());
     log('no second record for dup number', invoiceDocs().filter(d => d.invoiceNumber === '22889946').length === 1);
     log('inbox still pending', inboxDoc() && inboxDoc().status === 'pending');
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
   }
 
   else if (scenario === 'print') {
     await openItemFromInbox();
-    await waitSummary();
-    clickOkSummary();
+    await maybeSummaryOk();
     await waitDocForm(1, 4);
     const sel = document.getElementById('invoiceSupplierSelect');
     sel.value = '__other__';
@@ -313,15 +346,14 @@ try {
 
   else if (scenario === 'supcollide') {
     await openItemFromInbox();
-    const ov = await waitSummary();
-    log('same number two suppliers -> 2 docs', ov.textContent.includes('זוהו 2 מסמכים'));
-    clickOkSummary();
+    await maybeSummaryOk();   // same number two suppliers -> 2 docs - מוכח ע"י שני טפסי המסמכים
     await waitDocForm(1, 2);
     fillSupplierAndSave('ספק א');
     await waitSavedAlert(1);
     await waitDocForm(2, 2);
     fillSupplierAndSave('ספק ב');
     await waitSavedAlert(2);
+    await finishSplitReview();
     await waitFor(() => inboxDoc() && inboxDoc().status === 'approved', 'inbox approved');
     const dA = invoiceDocs().find(d => d.id === keyOf('555', 'ספק א', 'invoice'));
     const dB = invoiceDocs().find(d => d.id === keyOf('555', 'ספק ב', 'invoice'));
@@ -332,15 +364,14 @@ try {
 
   else if (scenario === 'typecollide') {
     await openItemFromInbox();
-    const ov = await waitSummary();
-    log('same number invoice+credit -> 2 docs', ov.textContent.includes('זוהו 2 מסמכים'));
-    clickOkSummary();
+    await maybeSummaryOk();   // same number invoice+credit -> 2 docs - מוכח ע"י שני טפסי המסמכים
     await waitDocForm(1, 2);
     fillSupplierAndSave();
     await waitSavedAlert(1);
     await waitDocForm(2, 2);
     fillSupplierAndSave();
     await waitSavedAlert(2);
+    await finishSplitReview();
     await waitFor(() => inboxDoc() && inboxDoc().status === 'approved', 'inbox approved');
     const dI = invoiceDocs().find(d => d.id === keyOf('555', SUP, 'invoice'));
     const dC = invoiceDocs().find(d => d.id === keyOf('555', SUP, 'credit'));
@@ -367,6 +398,7 @@ try {
     document.getElementById('invoiceNumberInput').value = '777';
     fillSupplierAndSave();
     await waitSavedAlert(1);
+    await finishSplitReview();
     await waitFor(() => inboxDoc() && inboxDoc().status === 'approved', 'inbox approved');
     const d = invoiceDocs().find(x => x.id === keyOf('777', SUP, 'invoice'));
     log('saved under typed number', !!d, invoiceDocs().map(x => x.id).join(','));
@@ -375,8 +407,7 @@ try {
 
   else if (scenario === 'editresume') {
     await openItemFromInbox();
-    await waitSummary();
-    clickOkSummary();
+    await maybeSummaryOk();
     await waitDocForm(1, 4);
     document.getElementById('invoiceNumberInput').value = '99999';
     fillSupplierAndSave();
@@ -385,12 +416,11 @@ try {
     log('edited identity saved under edited key', edited && edited.id === keyOf('99999', SUP, 'credit'), edited && edited.id);
     log('ownership meta kept', inboxDoc().splitOwnersMeta && inboxDoc().splitOwnersMeta[edited.id].number === '99999');
     await waitDocForm(2, 4);
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
     await sleep(300);
     // resume with edit: the edited record opens, no second record
     await openItemFromInbox();
-    await waitSummary();
-    clickOkSummary();
+    await maybeSummaryOk();
     window.__confirmScript = [{ match: 'כבר נשמר', answer: true }];
     await waitFor(() => formVisible(), 'edit form for edited doc');
     log('edited identity retained for edit', document.getElementById('invoiceNumberInput').value === '99999');
@@ -403,15 +433,14 @@ try {
     log('no false duplicate block', !window.__confirms.some(c => c.includes('כבר קיימת')));
     // resume again with skip: doc1 skipped, doc2 opens fresh
     await openItemFromInbox();
-    await waitSummary();
-    clickOkSummary();
+    await maybeSummaryOk();
     window.__confirmScript = [{ match: 'כבר נשמר', answer: false }];
     await waitDocForm(2, 4);
     log('skip advanced to doc2 fresh form', document.getElementById('invoiceNumberInput').value === '22889946');
     docs = invoiceDocs();
     log('still one record after skip', docs.length === 1, docs.map(d => d.id).join(','));
     log('inbox still pending', inboxDoc() && inboxDoc().status === 'pending');
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
   }
 
   else if (scenario === 'regroup-partial') {
@@ -427,7 +456,7 @@ try {
     const d1id = keyOf('22889733', SUP, 'credit');
     log('pages 1-2 owned by doc1', inboxDoc().splitOwners && inboxDoc().splitOwners['1'] === d1id && inboxDoc().splitOwners['2'] === d1id);
     await waitDocForm(2, 3);
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
     await sleep(300);
     // run 2: change the decision - page2 is now "new document"; both page1 and page2 groups are owned
     await openItemFromInbox();
@@ -445,7 +474,7 @@ try {
     log('page3 saved fresh', docs.length === 2 && docs.some(d => d.id === keyOf('22890297', SUP, 'credit')), docs.map(d => d.id).join(','));
     log('edited doc untouched', docs.find(d => d.id === d1id) && docs.find(d => d.id === d1id).invoiceNumber === '22889733');
     await waitDocForm(4, 4);
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
     log('inbox still pending', inboxDoc() && inboxDoc().status === 'pending');
   }
 
@@ -453,35 +482,32 @@ try {
     const phase = new URLSearchParams(location.search).get('phase') || '1';
     if (phase === '1') {
       await openItemFromInbox();
-      await waitSummary();
-      clickOkSummary();
+      await maybeSummaryOk();
       await waitDocForm(1, 4);
       fillSupplierAndSave();
       await waitSavedAlert(1);
       await waitDocForm(2, 4);
-      [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+      await cancelSplitReview();
       await sleep(300);
       log('saved before reload', invoiceDocs().length === 1);
       const q = new URLSearchParams(location.search); q.set('phase', '2');
       location.href = location.pathname + '?' + q.toString();   // real reload - ownership must survive
       await new Promise(() => {});
     } else {
-      await openItemFromInbox();
-      await waitSummary();
-      clickOkSummary();
       window.__confirmScript = [{ match: 'כבר נשמר', answer: false }];
+      await openItemFromInbox();
+      await maybeSummaryOk();
       await waitDocForm(2, 4);
       log('ownership survived reload (skip offered)', window.__confirms.some(c => c.includes('כבר נשמר')));
       log('doc2 opens fresh after skip', document.getElementById('invoiceNumberInput').value === '22889946');
       log('single record preserved across reload', invoiceDocs().length === 1);
-      [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+      await cancelSplitReview();
     }
   }
 
   else if (scenario === 'savefault') {
     await openItemFromInbox();
-    await waitSummary();
-    clickOkSummary();
+    await maybeSummaryOk();
     await waitDocForm(1, 4);
     __failNextWrite('yoko_inbox/');   // the ownership write fails inside the batch -> whole save must roll back
     fillSupplierAndSave();
@@ -497,7 +523,7 @@ try {
     log('retry saved single record', docs.length === 1 && docs[0].id === keyOf('22889733', SUP, 'credit'), docs.map(d => d.id).join(','));
     log('ownership claimed after success', inboxDoc().splitOwners && inboxDoc().splitOwners['1'] === docs[0].id);
     await waitDocForm(2, 4);
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
   }
 
   else if (scenario === 'mixedowner') {
@@ -511,7 +537,7 @@ try {
     fillSupplierAndSave();
     await waitSavedAlert(1);
     await waitDocForm(2, 3);
-    [...document.querySelectorAll('#invoiceConfirmForm button')].find(b => b.textContent.trim() === 'ביטול').click();
+    await cancelSplitReview();
     await sleep(300);
     // run 2: page2 declared "part of next" -> group [2,3] mixes saved page 2 with unsaved page 3
     await openItemFromInbox();
@@ -546,6 +572,7 @@ try {
     await waitDocForm(3, 3);
     fillSupplierAndSave();
     await waitSavedAlert(3);
+    await finishSplitReview();
     await waitFor(() => inboxDoc() && inboxDoc().status === 'approved', 'inbox approved only after all pages saved');
     window.__step = 'mix7';
     log('inbox approved when complete', true);
@@ -573,7 +600,151 @@ try {
     }
     await sleep(400);
     log('inbox NOT closed with unowned page', inboxDoc() && inboxDoc().status === 'pending');
-    log('user told which pages remain', window.__toasts && window.__toasts.some(t => t.includes('עמודים 2')), JSON.stringify(window.__toasts || []));
+    const pcEnd = await waitFor(() => document.getElementById('splitReviewEnd'), 'review end');
+    log('user told which documents remain', pcEnd.textContent.includes('מחכים לבדיקה'), pcEnd.textContent.replace(/\s+/g, ' ').slice(0, 140));
+  }
+
+  else if (scenario.startsWith('credit-') && scenario !== 'credit-edit' && scenario !== 'credit-splitdraft') {
+    // כל עמודי הקובץ עם אותו מספר -> מסמך יחיד, הטופס נפתח ישירות בלי מסך פיצול
+    const num = '9' + String(10000 + scenario.length);
+    cannedSingle(num, scenario === 'credit-ocr', scenario === 'credit-ocr' ? 152 : 300);
+    await openItemFromInbox();
+    await waitFor(formVisible, 'single-doc form');
+    const cb = document.getElementById('creditModeToggle');
+    const wrap = document.getElementById('creditModeWrap');
+    const field = document.getElementById('invoiceAmountInput');
+    const label = document.getElementById('amountLabel');
+    const hint = document.getElementById('creditModeHint');
+    const setToggle = on => { cb.checked = on; cb.dispatchEvent(new Event('change')); };
+
+    if (scenario === 'credit-ocr') {
+      log('OCR credit: toggle auto-on', cb.checked === true);
+      log('OCR credit: positive display', field.value === '152', field.value);
+      log('OCR credit: label switched', label.innerText.includes('סכום הזיכוי'), label.innerText);
+      log('OCR credit: hint shown', hint.innerText.includes('יישמר כזיכוי'), hint.innerText);
+      fillSupplierAndSave();
+      await waitSavedAlert(1);
+      const docs = invoiceDocs();
+      log('OCR credit: stored negative', docs.length === 1 && docs[0].amount === -152, docs.map(x => String(x.amount)).join(','));
+    }
+
+    if (scenario === 'credit-manual') {
+      log('regular scan: toggle off', cb.checked === false);
+      log('regular scan: positive amount', field.value === '300', field.value);
+      field.value = '152';
+      setToggle(true);
+      log('manual: label switched', label.innerText.includes('סכום הזיכוי'), label.innerText);
+      log('manual: hint shown', hint.innerText.includes('אין צורך להזין מינוס'), hint.innerText);
+      fillSupplierAndSave();
+      await waitSavedAlert(1);
+      const docs = invoiceDocs();
+      log('manual: stored negative', docs.length === 1 && docs[0].amount === -152, docs.map(x => String(x.amount)).join(','));
+    }
+
+    if (scenario === 'credit-doubleminus') {
+      setToggle(true);
+      field.value = '-152';
+      fillSupplierAndSave();
+      await waitSavedAlert(1);
+      const docs = invoiceDocs();
+      log('double minus: stored -152 not +152', docs.length === 1 && docs[0].amount === -152, docs.map(x => String(x.amount)).join(','));
+    }
+
+    if (scenario === 'credit-legacy') {
+      field.value = '-152';
+      fillSupplierAndSave();
+      await waitSavedAlert(1);
+      const docs = invoiceDocs();
+      log('legacy minus without toggle still works', docs.length === 1 && docs[0].amount === -152, docs.map(x => String(x.amount)).join(','));
+    }
+
+    if (scenario === 'credit-validation') {
+      setToggle(true);
+      field.value = '';
+      fillSupplierAndSave();
+      await waitFor(() => window.__alerts.some(a => a.includes('לא הוזן סכום')), 'empty alert');
+      log('empty: credit-specific message', window.__alerts.some(a => a.includes('לא הוזן סכום') && a.includes('הזיכוי')), JSON.stringify(window.__alerts.slice(-1)));
+      field.value = '0';
+      document.getElementById('saveInvoiceBtn').click();
+      await waitFor(() => window.__alerts.some(a => a.includes('סכום הזיכוי לא יכול להיות 0')), 'zero alert');
+      log('zero: credit-specific message', true);
+      field.value = 'abc';
+      document.getElementById('saveInvoiceBtn').click();
+      await waitFor(() => window.__alerts.some(a => a.includes('לא נקלט כמספר תקין')), 'invalid alert');
+      log('invalid: rejected', true);
+      log('validation: nothing stored', invoiceDocs().length === 0, String(invoiceDocs().length));
+    }
+
+    if (scenario === 'credit-income') {
+      const ts = document.getElementById('docTypeSelect');
+      ts.value = 'income'; ts.dispatchEvent(new Event('change'));
+      log('income: toggle still visible', !wrap.classList.contains('hidden'));
+      setToggle(true);
+      field.value = '200';
+      window.__promptAnswer = 'לקוח בדיקה';
+      fillSupplierAndSave('לקוח בדיקה');
+      await waitSavedAlert(1);
+      const docs = invoiceDocs();
+      const inc = docs.find(x => x.docType === 'income');
+      log('income credit stored negative', inc && inc.amount === -200, inc && String(inc.amount));
+      log('income credit customer saved', inc && (inc.customer === 'לקוח בדיקה' || inc.supplier === 'לקוח בדיקה'), inc && (inc.customer || inc.supplier));
+    }
+
+    if (scenario === 'credit-delivery') {
+      log('invoice mode: wrap visible', !wrap.classList.contains('hidden'));
+      setToggle(true);
+      const ts = document.getElementById('docTypeSelect');
+      ts.value = 'delivery'; ts.dispatchEvent(new Event('change'));
+      log('delivery: wrap hidden', wrap.classList.contains('hidden'));
+      log('delivery: toggle force-unchecked', cb.checked === false);
+      log('delivery: amount label restored', label.innerText.includes('תעודה'), label.innerText);
+      ts.value = 'invoice'; ts.dispatchEvent(new Event('change'));
+      log('back to invoice: wrap visible', !wrap.classList.contains('hidden'));
+      log('back to invoice: toggle stays off (safe default)', cb.checked === false);
+    }
+  }
+
+  else if (scenario === 'credit-edit') {
+    await window.loadInvoicesForMonth();
+    await waitFor(() => [...document.querySelectorAll('td')].some(td => td.textContent.includes('352000')), 'month table row');
+    window.editInvoiceEntry('existing_credit');
+    await waitFor(formVisible, 'edit form');
+    const cb = document.getElementById('creditModeToggle');
+    const field = document.getElementById('invoiceAmountInput');
+    log('edit: toggle auto-on for stored credit', cb.checked === true);
+    log('edit: stored -152 shown as 152', field.value === '152', field.value);
+    log('edit: label switched', document.getElementById('amountLabel').innerText.includes('סכום הזיכוי'));
+    document.getElementById('saveInvoiceBtn').click();
+    await waitOkAlert(1);
+    const docs = invoiceDocs();
+    const doc1 = docs.find(x => x.id === 'existing_credit');
+    log('edit: still one doc, amount stays -152', docs.length === 1 && doc1 && doc1.amount === -152, docs.map(x => x.id + ':' + x.amount).join(','));
+  }
+
+  else if (scenario === 'credit-splitdraft') {
+    await openItemFromInbox();
+    await maybeSummaryOk();
+    await waitDocForm(1, 4);
+    log('doc1 auto credit toggle', document.getElementById('creditModeToggle').checked === true);
+    log('doc1 positive display', document.getElementById('invoiceAmountInput').value === '130', document.getElementById('invoiceAmountInput').value);
+    document.getElementById('splitSkipNext').click();
+    await waitDocForm(2, 4);
+    document.getElementById('splitReviewList').click();
+    const endBox = await waitFor(() => document.getElementById('splitReviewEnd'), 'review end');
+    const backBtn = [...endBox.querySelectorAll('button')].find(b => b.textContent.includes('מסמך 1'));
+    backBtn.click();
+    await waitDocForm(1, 4);
+    log('doc1 draft keeps credit toggle', document.getElementById('creditModeToggle').checked === true);
+    log('doc1 draft keeps positive display', document.getElementById('invoiceAmountInput').value === '130', document.getElementById('invoiceAmountInput').value);
+  }
+
+  else if (scenario === 'shot-credit') {
+    cannedSingle('91500', true, 152);
+    await openItemFromInbox();
+    await waitFor(formVisible, 'single-doc form');
+    await waitFor(() => document.getElementById('creditModeToggle').checked, 'auto credit toggle');
+    window.__shotReady = true;
+    throw { __shot: true };
   }
 
   else if (scenario === 'shot-ambiguity') {
@@ -592,8 +763,7 @@ try {
   }
   else if (scenario === 'shot-form') {
     await openItemFromInbox();
-    await waitSummary();
-    clickOkSummary();
+    await maybeSummaryOk();
     await waitDocForm(1, 4);
     window.__shotReady = true;
     throw { __shot: true };

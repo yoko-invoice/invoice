@@ -129,6 +129,13 @@
                     <label id="amountLabel">סכום לתשלום (₪):</label>
                     <input type="text" id="invoiceAmountInput" inputmode="decimal" dir="ltr" style="text-align:right" autocomplete="off" spellcheck="false" placeholder="0.00">
                 </div>
+                <div class="form-group hidden" id="creditModeWrap" style="margin-top:-6px;">
+                    <label style="display:flex; align-items:center; gap:6px; font-weight:normal; cursor:pointer;">
+                        <input type="checkbox" id="creditModeToggle" onchange="onCreditModeChange()" style="width:18px; height:18px; flex:none;">
+                        חשבונית זיכוי - מזינים את הסכום החיובי כפי שמופיע במסמך
+                    </label>
+                    <div id="creditModeHint" style="font-size:0.75em; color:#c0392b; margin-top:2px;"></div>
+                </div>
                 <div class="form-group" id="paymentGroup">
                     <label>אמצעי תשלום:</label>
                     <input type="text" id="invoicePaymentMethodInput" list="paymentMethodsList" placeholder="בחר או הקלד אמצעי תשלום...">

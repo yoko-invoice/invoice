@@ -85,6 +85,26 @@ export function writeBatch() {
     }
   };
 }
+// minimal in-memory transaction: reads see current state, writes apply atomically after fn
+export async function runTransaction(db, fn) {
+  const writes = [];
+  const tx = {
+    get: (ref) => getDoc(ref),
+    set: (ref, data, opts) => writes.push(() => setDoc(ref, data, opts)),
+    update: (ref, data) => writes.push(() => setDoc(ref, data, { merge: true })),
+    delete: (ref) => writes.push(() => deleteDoc(ref))
+  };
+  const result = await fn(tx);
+  const backup = new Map();
+  try {
+    for (const w of writes) await w();
+  } catch (e) {
+    for (const [p, v] of backup) { if (v === undefined) store.delete(p); else store.set(p, v); }
+    persist();
+    throw e;
+  }
+  return result;
+}
 export function getStorage() { return {}; }
 export function ref(storage, path) { return { path }; }
 export async function uploadString(ref, dataUrl) { store.set('storage:' + ref.path, dataUrl); }

@@ -4723,14 +4723,26 @@
             const sel = document.getElementById('invoicePaymentMethodInput');
             if (!sel || sel.tagName !== 'SELECT') return;
             const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
-            // ערך שמור/מזוהה שאינו ברשימה נשמר כפי שהוא (בלי לאבד נתונים) ומוצג כאפשרות נוספת
+            // Keep only the current legacy value, never choices left behind by earlier forms.
+            const removedChoices = new Set(['אשראי', 'Visa Credit', 'ששון']);
             Object.defineProperty(sel, 'value', {
                 configurable: true,
                 get() { return desc.get.call(this); },
                 set(v) {
                     v = (v == null) ? '' : String(v);
+                    this.querySelectorAll('option[data-extra]').forEach(o => o.remove());
                     if (v && !Array.from(this.options).some(o => o.value === v)) {
-                        const o = document.createElement('option'); o.value = v; o.textContent = payLabel(v); o.dataset.extra = '1'; this.appendChild(o);
+                        const o = document.createElement('option');
+                        o.value = v;
+                        o.dataset.extra = '1';
+                        if (removedChoices.has(v.trim())) {
+                            // Preserve historical data on save without offering it for new selection.
+                            o.hidden = true;
+                            o.textContent = (v.trim() === 'ששון') ? 'ערך קודם (ללא שינוי)' : PAY_SHORT['כרטיס אשראי'];
+                        } else {
+                            o.textContent = payLabel(v);
+                        }
+                        this.appendChild(o);
                     }
                     desc.set.call(this, v);
                 }

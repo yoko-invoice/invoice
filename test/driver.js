@@ -138,6 +138,11 @@ if (scenario === 'credit-edit') {
   });
 }
 if (scenario === 'itempay') {
+  for (const [i, method] of ['אשראי', 'Visa Credit', 'ששון'].entries()) {
+    __seed('yoko_invoices/removed_' + i, { id: 'removed_' + i, docType: 'invoice', supplier: SUP,
+      invoiceNumber: '790' + i, invoiceDate: '2026-11-07', amount: 60 + i, monthKey: '2026-11',
+      items: [], paymentMethod: method });
+  }
   __seed('yoko_settings/suppliers_list', { suppliers: [SUP] });
   __seed('yoko_invoices/ip_a', { id: 'ip_a', docType: 'invoice', supplier: SUP, invoiceNumber: '7001', invoiceDate: '2026-11-03', amount: 20, monthKey: '2026-11',
     items: [{ name: 'חומרי בניין', quantity: 1, price: 20 }, { name: 'צבע', quantity: 2, price: 5 }], paymentMethod: 'אשראי ויזה' });
@@ -748,6 +753,31 @@ try {
     document.getElementById('saveInvoiceBtn').click();
     await waitOkAlert(1);
     log('chosen option stored as full word', __store.get('yoko_invoices/ip_b').paymentMethod === 'העברה בנקאית', __store.get('yoko_invoices/ip_b').paymentMethod);
+    const removed = ['אשראי', 'Visa Credit', 'ששון'];
+    for (const [i, method] of removed.entries()) {
+      window.editInvoiceEntry('removed_' + i);
+      await waitFor(formVisible, 'legacy edit ' + i);
+      log('legacy raw value retained ' + i, pb.value === method, pb.value);
+      log('removed label absent from selectable choices ' + i,
+        [...pb.options].every(o => o.hidden || !removed.includes(o.value)));
+      log('only current legacy extra retained ' + i, pb.querySelectorAll('option[data-extra]').length === 1);
+      document.getElementById('saveInvoiceBtn').click();
+      await waitOkAlert(1);
+      log('legacy stored payment unchanged ' + i, __store.get('yoko_invoices/removed_' + i).paymentMethod === method);
+      log('legacy amount untouched ' + i, __store.get('yoko_invoices/removed_' + i).amount === 60 + i);
+      window.editInvoiceEntry('ip_c');
+      await waitFor(formVisible, 'canonical edit ' + i);
+      log('no stale extra options ' + i, pb.querySelectorAll('option[data-extra]').length === 0);
+    }
+    pb.value = '';
+    log('new empty selection contains no removed options', [...pb.options].every(o => !removed.includes(o.value)));
+    log('unrelated standard choices retained', ['עמלה', "צ'ק", 'זיכוי', 'הכנסה', 'חיצוני'].every(v => [...pb.options].some(o => o.value === v)));
+    pb.value = 'מזומן';
+    log('unrelated custom payment retained', pb.value === 'מזומן' && !pb.selectedOptions[0].hidden);
+    pb.value = 'Visa Credit';
+    pb.value = 'כרטיס אשראי';
+    log('explicit canonical selection clears legacy', pb.value === 'כרטיס אשראי' && ![...pb.options].some(o => o.value === 'Visa Credit'));
+
   }
 
   else if (scenario === 'credit-edit') {

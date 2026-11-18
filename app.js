@@ -2523,7 +2523,7 @@
                 // פריטים: מאוחדים מכל העמודים
                 recognizedItemsList = Array.isArray(merged.items) ? merged.items : [];
                 document.getElementById('invoiceItemsDisplay').innerHTML = (recognizedItemsList.length
-                    ? recognizedItemsList.map(it => `• <b>${esc(it.name)}</b> - כמות: ${esc(it.quantity || 1)}${it.price ? ' (' + it.price + ' ₪)' : ''}`).join('<br>')
+                    ? itemsEditHtml()
                     : 'לא זוהו פרטים בשרת.') + chargesHtml(merged.charges);
 
                 // סכום: מתעדכן רק אם המשתמש לא שינה אותו ידנית
@@ -4045,9 +4045,7 @@
             const chargesToShow = (recognized && Array.isArray(recognized.charges) ? recognized.charges : null)
                 || (existingInvoice && Array.isArray(existingInvoice.charges) ? existingInvoice.charges : []);
             if (recognizedItemsList.length > 0) {
-                itemsDisplay.innerHTML = recognizedItemsList.map(it =>
-                    `• <b>${esc(it.name)}</b> - כמות: ${esc(it.quantity || 1)}${it.price ? ' (' + it.price + ' ₪)' : ''}`
-                ).join('<br>') + chargesHtml(chargesToShow);
+                itemsDisplay.innerHTML = itemsEditHtml() + chargesHtml(chargesToShow);
             } else {
                 itemsDisplay.innerHTML = 'לא זוהו פרטים בשרת.' + chargesHtml(chargesToShow);
             }
@@ -4442,7 +4440,7 @@
                             <td>${esc(inv.supplier)}</td>
                             <td>${esc(inv.invoiceNumber || '-')}${inv.invoiceDate ? `<br><span style="font-size:0.8em; color:#777;">${esc(inv.invoiceDate.split('-').reverse().join('/'))}</span>` : ''}</td>
                             <td class="${isCredit ? 'credit-badge' : ''}">${amt.toFixed(2)} ₪ ${isCredit ? '(זיכוי)' : ''}</td>
-                            <td>${esc(inv.paymentMethod || '-')}</td>
+                            <td>${esc(payLabel(inv.paymentMethod) || '-')}</td>
                             <td>${esc(itemsTooltip)}${handwrittenBadgeHtml(inv)}</td>
                             <td>${esc(inv.notes || '-')}</td>
                             <td class="act-cell"><div class="act-grid">
@@ -4507,7 +4505,7 @@
                             <td>${esc(incomeCustomerName(inv))}</td>
                             <td>${esc(inv.invoiceNumber || '-')}${inv.invoiceDate ? `<br><span style="font-size:0.8em; color:#777;">${esc(inv.invoiceDate.split('-').reverse().join('/'))}</span>` : ''}</td>
                             <td>${amt.toFixed(2)} ₪</td>
-                            <td>${esc(inv.paymentMethod || '-')}</td>
+                            <td>${esc(payLabel(inv.paymentMethod) || '-')}</td>
                             <td>${esc(inv.notes || '-')}</td>
                             <td class="act-cell"><div class="act-grid">
                                 ${inv.imageUrl ? `<button class="view-img-btn" data-url="${esc(inv.imageUrl)}" onclick="openImageViewer(this.dataset.url)">📷 תמונה</button>` : '<span></span>'}
@@ -4719,6 +4717,35 @@
 
         // חשבונית "חיצונית" - שולמה מחוץ לעסק (אמצעי התשלום מכיל "חיצוני"): נשמרת, נערכת ומודפסת כרגיל,
         // אבל לא נספרת בסכומי דוח הספקים, בסיכום הספק ובגרפי ההוצאות.
+        const PAY_SHORT = { 'כרטיס אשראי': 'כ"א', 'הוראת קבע': 'ה"ק', 'העברה בנקאית': 'ה"ב' };
+        const payLabel = pm => { const t = String(pm == null ? '' : pm).trim(); return PAY_SHORT[t] || String(pm == null ? '' : pm); };
+        (function setupPaymentSelect() {
+            const sel = document.getElementById('invoicePaymentMethodInput');
+            if (!sel || sel.tagName !== 'SELECT') return;
+            const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+            // ערך שמור/מזוהה שאינו ברשימה נשמר כפי שהוא (בלי לאבד נתונים) ומוצג כאפשרות נוספת
+            Object.defineProperty(sel, 'value', {
+                configurable: true,
+                get() { return desc.get.call(this); },
+                set(v) {
+                    v = (v == null) ? '' : String(v);
+                    if (v && !Array.from(this.options).some(o => o.value === v)) {
+                        const o = document.createElement('option'); o.value = v; o.textContent = payLabel(v); o.dataset.extra = '1'; this.appendChild(o);
+                    }
+                    desc.set.call(this, v);
+                }
+            });
+        })();
+        window.editRecognizedItemName = function(i, v) {
+            const it = recognizedItemsList[i];
+            if (!it) return;
+            it.name = String(v == null ? '' : v).trim() || it.name;   // שם ריק לא נשמר
+        };
+        function itemsEditHtml() {
+            return recognizedItemsList.map((it, i) =>
+                `<div class="item-edit-row">• <input type="text" class="item-name-input" value="${esc(it.name)}" aria-label="שם הפריט" autocomplete="off" onchange="editRecognizedItemName(${i}, this.value)"> <span class="item-meta">כמות: ${esc(it.quantity || 1)}${it.price ? ' (' + it.price + ' ₪)' : ''}</span></div>`
+            ).join('');
+        }
         const isExternalPayment = pm => String(pm || '').indexOf('חיצוני') !== -1;
 
         // בונה שורה לכל ספק ברשימה (גם בלי חשבוניות), ואחריהם ספקים שאינם ברשימה אך יש להם חשבוניות
@@ -4740,7 +4767,7 @@
                 const edited = customReportEdits[name] || {};
                 const hasInvoices = !!info;
                 let amount = edited.amount !== undefined ? edited.amount : (hasInvoices ? info.amount : '');
-                const method = edited.method !== undefined ? edited.method : (hasInvoices ? (Array.from(info.methods).join(', ') || '') : '');
+                const method = edited.method !== undefined ? edited.method : (hasInvoices ? (Array.from(info.methods).map(payLabel).join(', ') || '') : '');
                 const notes = edited.notes !== undefined ? edited.notes : (hasInvoices ? (info.notes.join(' | ') || '') : '');
                 return { name, amount, method, notes };
             });

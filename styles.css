@@ -204,3 +204,7 @@
     #emailPrintArea .email-print-page { break-inside: avoid; page-break-inside: avoid; margin: 0; padding: 0; }
     #emailPrintArea .email-print-slice img { max-height: none !important; }
 }
+
+.item-edit-row { display:flex; align-items:center; gap:6px; margin:4px 0; }
+.item-edit-row .item-name-input { flex:1; min-width:0; margin:0; padding:6px 8px; font-weight:bold; }
+.item-edit-row .item-meta { white-space:nowrap; font-size:0.9em; color:#555; }

@@ -137,6 +137,14 @@ if (scenario === 'credit-edit') {
     invoiceDate: '2026-11-03', amount: -152, monthKey: '2026-11', items: [], paymentMethod: 'כרטיס אשראי'
   });
 }
+if (scenario === 'itempay') {
+  __seed('yoko_settings/suppliers_list', { suppliers: [SUP] });
+  __seed('yoko_invoices/ip_a', { id: 'ip_a', docType: 'invoice', supplier: SUP, invoiceNumber: '7001', invoiceDate: '2026-11-03', amount: 20, monthKey: '2026-11',
+    items: [{ name: 'חומרי בניין', quantity: 1, price: 20 }, { name: 'צבע', quantity: 2, price: 5 }], paymentMethod: 'אשראי ויזה' });
+  __seed('yoko_invoices/ip_b', { id: 'ip_b', docType: 'invoice', supplier: SUP, invoiceNumber: '7002', invoiceDate: '2026-11-04', amount: 30, monthKey: '2026-11', items: [], paymentMethod: 'כרטיס אשראי' });
+  __seed('yoko_invoices/ip_c', { id: 'ip_c', docType: 'invoice', supplier: SUP, invoiceNumber: '7003', invoiceDate: '2026-11-05', amount: 40, monthKey: '2026-11', items: [], paymentMethod: 'הוראת קבע' });
+  __seed('yoko_invoices/ip_d', { id: 'ip_d', docType: 'invoice', supplier: SUP, invoiceNumber: '7004', invoiceDate: '2026-11-06', amount: 50, monthKey: '2026-11', items: [], paymentMethod: 'העברה בנקאית' });
+}
 if (scenario === 'dupblock' && !__store.has('yoko_invoices/existing_dup')) {
   __seed('yoko_invoices/existing_dup', {
     id: 'existing_dup', docType: 'invoice', supplier: SUP, invoiceNumber: '22889946',
@@ -702,6 +710,44 @@ try {
       log('back to invoice: wrap visible', !wrap.classList.contains('hidden'));
       log('back to invoice: toggle stays off (safe default)', cb.checked === false);
     }
+  }
+
+  else if (scenario === 'itempay') {
+    await window.loadInvoicesForMonth();
+    await waitFor(() => [...document.querySelectorAll('td')].some(td => td.textContent.includes('7001')), 'month table row');
+    const cells = t => [...document.querySelectorAll('tr')].filter(r => r.textContent.includes(t)).map(r => r.textContent).join('|');
+    log('table: card shown as כ"א', cells('7002').includes('כ"א') && !cells('7002').includes('כרטיס אשראי'), cells('7002'));
+    log('table: standing order ה"ק', cells('7003').includes('ה"ק'), cells('7003'));
+    log('table: bank transfer ה"ב', cells('7004').includes('ה"ב'), cells('7004'));
+    log('table: custom value as stored', cells('7001').includes('אשראי ויזה'), cells('7001'));
+    log('storage untouched before edit', __store.get('yoko_invoices/ip_b').paymentMethod === 'כרטיס אשראי');
+    window.editInvoiceEntry('ip_a');
+    await waitFor(formVisible, 'edit form');
+    const pay = document.getElementById('invoicePaymentMethodInput');
+    log('payment is a select (no keyboard)', pay.tagName === 'SELECT');
+    log('custom stored value kept in select', pay.value === 'אשראי ויזה', pay.value);
+    const inputs = [...document.querySelectorAll('#invoiceItemsDisplay .item-name-input')];
+    log('item names editable', inputs.length === 2 && inputs[0].value === 'חומרי בניין', String(inputs.length));
+    inputs[0].value = 'חומרי בניין - מתוקן';
+    inputs[0].dispatchEvent(new Event('change'));
+    inputs[1].value = '   ';
+    inputs[1].dispatchEvent(new Event('change'));
+    document.getElementById('saveInvoiceBtn').click();
+    await waitOkAlert(1);
+    const a = __store.get('yoko_invoices/ip_a');
+    log('item name saved', a.items[0].name === 'חומרי בניין - מתוקן' && a.items[0].quantity === 1 && a.items[0].price === 20, JSON.stringify(a.items));
+    log('empty name not saved (kept old)', a.items[1].name === 'צבע' && a.items[1].quantity === 2, JSON.stringify(a.items));
+    log('payment kept exactly', a.paymentMethod === 'אשראי ויזה', a.paymentMethod);
+    log('amount untouched', a.amount === 20);
+    // pick from list: card stored as full word
+    window.editInvoiceEntry('ip_b');
+    await waitFor(formVisible, 'edit form b');
+    const pb = document.getElementById('invoicePaymentMethodInput');
+    log('card selected, label כ"א', pb.value === 'כרטיס אשראי' && pb.selectedOptions[0].textContent === 'כ"א', pb.selectedOptions[0].textContent);
+    pb.value = 'העברה בנקאית'; pb.dispatchEvent(new Event('change'));
+    document.getElementById('saveInvoiceBtn').click();
+    await waitOkAlert(1);
+    log('chosen option stored as full word', __store.get('yoko_invoices/ip_b').paymentMethod === 'העברה בנקאית', __store.get('yoko_invoices/ip_b').paymentMethod);
   }
 
   else if (scenario === 'credit-edit') {

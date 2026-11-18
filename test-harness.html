@@ -137,17 +137,17 @@
                 </div>
                 <div class="form-group" id="paymentGroup">
                     <label>אמצעי תשלום:</label>
-                    <input type="text" id="invoicePaymentMethodInput" list="paymentMethodsList" placeholder="בחר או הקלד אמצעי תשלום...">
-                    <datalist id="paymentMethodsList">
-                        <option value="כרטיס אשראי">כרטיס אשראי</option>
-                        <option value="העברה בנקאית">העברה בנקאית</option>
-                        <option value="הוראת קבע">הוראת קבע</option>
+                    <select id="invoicePaymentMethodInput">
+                        <option value="">בחר אמצעי תשלום...</option>
+                        <option value="כרטיס אשראי">כ"א</option>
+                        <option value="העברה בנקאית">ה"ב</option>
+                        <option value="הוראת קבע">ה"ק</option>
                         <option value="עמלה">עמלה</option>
                         <option value="צ'ק">צ'ק</option>
                         <option value="זיכוי">זיכוי</option>
                         <option value="הכנסה">הכנסה - יועבר לרשימת ההכנסות</option>
                         <option value="חיצוני">חיצוני - שולם מחוץ לעסק, לא נספר בסכומי הדוח</option>
-                    </datalist>
+                    </select>
                 </div>
                 <div class="form-group">
                     <label>פרטים שזוהו בחשבונית:</label>

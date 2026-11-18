@@ -1,4 +1,4 @@
-const CACHE = 'invoices-v40-v13-review-20261117';
+const CACHE = 'invoices-v41-v14-amount-20261118';
 
 // קבצי האפליקציה (חובה לעבודה אופליין)
 const CORE = [

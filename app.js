@@ -3,6 +3,34 @@
         import { getAuth, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
         import { getStorage, ref as storageRef, uploadString, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
+        // Keep the raw amount text until validation. Native number inputs can display
+        // an invalid edit while returning an empty .value, or discard a minus/comma.
+        function parseInvoiceAmountValue(raw) {
+            const text = String(raw ?? '').trim().replace(/^\u2212/, '-');
+            // A comma is accepted only as an unambiguous decimal separator (1-2 digits).
+            // No grouping, trailing signs, exponents, currency text or partial parsing.
+            const plain = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(text);
+            const decimalComma = /^[+-]?(?:\d+,\d{1,2}|,\d{1,2})$/.test(text);
+            if (!plain && !decimalComma) return NaN;
+            const amount = Number(decimalComma ? text.replace(',', '.') : text);
+            return Number.isFinite(amount) ? amount : NaN;
+        }
+        function readInvoiceAmount() {
+            return parseInvoiceAmountValue(document.getElementById('invoiceAmountInput').value);
+        }
+        function warnInvalidInvoiceAmount() {
+            const input = document.getElementById('invoiceAmountInput');
+            const amount = parseInvoiceAmountValue(input.value);
+            const message = !input.value.trim()
+                ? '⚠️ לא הוזן סכום. הזן סכום לתשלום, או סכום שלילי לזיכוי (למשל ‎-100.00).'
+                : amount === 0
+                    ? '⚠️ סכום החשבונית לא יכול להיות 0. לזיכוי יש להזין סכום שלילי.'
+                    : '⚠️ הסכום לא נקלט כמספר תקין. הזן ספרות, נקודה או פסיק עשרוני, ומינוס אחד בתחילת הסכום לזיכוי (למשל ‎-100.00). אין להזין מפרידי אלפים.';
+            alert(message);
+            input.focus();
+            return false;
+        }
+
         const firebaseConfig = {
             apiKey: "AIzaSyASfs5MXS62ehM1kVSj0pudOEUGUh37BYI",
             authDomain: "work-schedule-17c39.firebaseapp.com",
@@ -1243,7 +1271,7 @@
         // מחזיר שם ספק מהרשימה, או '' אם אין התאמה בטוחה
         function matchSupplier(rawName, taxId) {
             const tax = String(taxId || '').replace(/\D/g, '');
-            if (tax.length >= 8 && supplierAliases.taxIds[tax] && suppliersList.includes(supplierAliases.taxIds[tax])) {
+            if (tax !== OWN_BUSINESS_TAX_ID && tax.length >= 8 && supplierAliases.taxIds[tax] && suppliersList.includes(supplierAliases.taxIds[tax])) {
                 return supplierAliases.taxIds[tax];
             }
             const raw = String(rawName || '').trim();
@@ -1262,13 +1290,27 @@
             return scored[0].sup;
         }
 
+        function supplierIdValue(value) {
+            const id=String(value || '').replace(/\D/g,'');
+            return /^\d{9}$/.test(id) && id !== OWN_BUSINESS_TAX_ID ? id : '';
+        }
+        function supplierCandidateIds(parsed) {
+            return [...new Set((parsed?.taxIds || []).map(t=>supplierIdValue(t?.value))
+                .concat(supplierIdValue(parsed?.taxId || parsed?.businessId)).filter(Boolean))].sort();
+        }
+        function learningIssuerData(raw,role) {
+            if(!raw || role==='income')return raw;
+            return {...raw,taxId:supplierIdValue(raw.taxId),businessId:supplierIdValue(raw.businessId),
+                taxIds:(raw.taxIds||[]).filter(t=>supplierIdValue(t?.value))};
+        }
+
         // מזהי מנפיק מרובים (למשל ח.פ וגם ע.מ): מנסים כל מזהה מול מפת הכינויים.
         // שני מזהים שמצביעים לספקים שונים = קונפליקט גלוי - בלי בחירה ובלי מיזוג אוטומטי.
         // מזהה אחד תואם אינו ראיה ששאר המזהים שייכים לאותו ספק - לא לומדים אותם אוטומטית.
         function matchSupplierByIds(taxIds) {
             if (!Array.isArray(taxIds) || !taxIds.length) return { supplier: '', conflict: false };
             const hits = [...new Set(taxIds
-                .map(t => { const tax = String(t && t.value || '').replace(/\D/g, ''); return tax.length >= 8 ? supplierAliases.taxIds[tax] : null; })
+                .map(t => { const tax = String(t && t.value || '').replace(/\D/g, ''); return tax !== OWN_BUSINESS_TAX_ID && tax.length >= 8 ? supplierAliases.taxIds[tax] : null; })
                 .filter(s => s && suppliersList.includes(s)))];
             if (hits.length > 1) return { supplier: '', conflict: true, hits };
             return { supplier: hits[0] || '', conflict: false };
@@ -1284,21 +1326,21 @@
             if (!chosenSupplier || !feedback || !feedback.confirmed || feedback.role === 'income' || navigator.onLine === false) return;
             try {
                 const n = normSupplierName(feedback.rawName);
-                const tax = feedback.taxConfirmed ? String(feedback.rawTax || '').replace(/\D/g, '') : '';
-                if (!n && tax.length < 8) return;
+                const taxes = feedback.taxConfirmed ? [...new Set((feedback.eligibleIds || []).map(supplierIdValue).filter(Boolean))] : [];
+                if (!n && !taxes.length) return;
                 const ref = getSettingsDoc('supplier_aliases');
                 const outcome = await runTransaction(db, async tx => {
                     const snap = await tx.get(ref);
                     const old = snap.exists() ? snap.data() : {};
                     const aliases = { ...old, names: { ...(old.names || {}) }, taxIds: { ...(old.taxIds || {}) } };
                     if ((n && aliases.names[n] && aliases.names[n] !== chosenSupplier) ||
-                        (tax && aliases.taxIds[tax] && aliases.taxIds[tax] !== chosenSupplier)) return { conflict: true };
+                        taxes.some(tax=>aliases.taxIds[tax] && aliases.taxIds[tax] !== chosenSupplier)) return { conflict: true };
                     let changed = false;
                     if (n && n !== normSupplierName(chosenSupplier) && aliases.names[n] !== chosenSupplier) {
                         aliases.names[n] = chosenSupplier; changed = true;
                     }
-                    if (tax.length >= 8 && aliases.taxIds[tax] !== chosenSupplier) {
-                        aliases.taxIds[tax] = chosenSupplier; changed = true;
+                    for(const tax of taxes) {
+                        if(aliases.taxIds[tax] !== chosenSupplier) {aliases.taxIds[tax] = chosenSupplier; changed = true;}
                     }
                     if (changed) tx.set(ref, aliases);
                     return { aliases };
@@ -1318,10 +1360,10 @@
 
         async function learnCorrectionExample(raw, final, role, sourceId) {
             if(!raw || navigator.onLine===false || !globalThis.InvoiceLearning)return;
-            const base=raw._learningOriginal || raw;
+            const base=learningIssuerData(raw._learningOriginal || raw,role);
             const e=InvoiceLearning.example({raw:base,final,role,restaurant:RESTAURANT_ID,sourceId,confirmed:true});
             if(!e)return;
-            e.sourceDisplay={number:document.getElementById('invoiceNumberInput').value.trim(),date:final.invoiceDate||document.getElementById('invoiceDateInput').value,kind:role==='delivery'?'תעודת משלוח':(Number(document.getElementById('invoiceAmountInput').value)<0?'חשבונית זיכוי':'חשבונית'),source:pendingInboxItem?.source==='email'?'דואר אלקטרוני':'העלאה או צילום'};
+            e.sourceDisplay={number:document.getElementById('invoiceNumberInput').value.trim(),date:final.invoiceDate||document.getElementById('invoiceDateInput').value,kind:role==='delivery'?'תעודת משלוח':(readInvoiceAmount()<0?'חשבונית זיכוי':'חשבונית'),source:pendingInboxItem?.source==='email'?'דואר אלקטרוני':'העלאה או צילום'};
             try {
                 await runTransaction(db,async tx=>{
                     const ref=getSettingsDoc('recognition_examples');const snap=await tx.get(ref);
@@ -1332,10 +1374,29 @@
             } catch(err) {showToast('⚠️ המסמך נשמר, אך דוגמת התיקון לא נשמרה ללמידה.','err');}
         }
         window.manageRecognitionExamples=async function() {
-            const snap=await getDoc(getSettingsDoc('recognition_examples'));const entries=snap.exists()?snap.data().entries||[]:[];
-            const box=document.createElement('div');box.style.cssText='position:fixed;inset:5%;background:white;z-index:20000;overflow:auto;padding:16px;border:2px solid #777;border-radius:12px;';
-            const h=document.createElement('h3');h.textContent='תיקונים שנשמרו לזיהוי';box.append(h);
-            const close=document.createElement('button');close.textContent='סגור';close.onclick=()=>box.remove();box.append(close);
+            let examples,aliases;
+            try {
+                [examples,aliases]=await Promise.all([getDoc(getSettingsDoc('recognition_examples')),getDoc(getSettingsDoc('supplier_aliases'))]);
+            } catch(err) {showToast('לא ניתן לטעון את השיוכים והדוגמאות. נסה שוב.','err');return;}
+            const entries=examples.exists() && Array.isArray(examples.data().entries)?examples.data().entries:[];
+            const mapping=aliases.exists()?aliases.data():{};
+            const box=document.createElement('div');box.id='recognitionLearningPanel';box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');
+            box.style.cssText='position:fixed;top:5%;left:5%;right:5%;max-height:85vh;box-sizing:border-box;background:white;z-index:20000;overflow:auto;padding:16px;border:2px solid #777;border-radius:12px;';
+            const h=document.createElement('h3');h.textContent='שיוכי ספקים ודוגמאות לזיהוי';box.append(h);
+            const intro=document.createElement('p');intro.textContent='מוצגים רק שיוכים ודוגמאות שכבר נשמרו. שינויים בסריקה הפתוחה אינם מוצגים כאן לפני שמירה. תיקוני סכום ומספר חשבונית אינם דוגמאות לזיהוי עתידי.';intro.style.cssText='font-size:0.9em;line-height:1.5';box.append(intro);
+            const close=document.createElement('button');close.type='button';close.textContent='סגור';close.onclick=()=>box.remove();box.append(close);
+            const section=title=>{const h=document.createElement('h4');h.textContent=title;box.append(h);};
+            const message=text=>{const p=document.createElement('p');p.textContent=text;p.style.cssText='overflow-wrap:anywhere;line-height:1.5';box.append(p);return p;};
+            section('שיוכי ספקים שנשמרו');
+            const names=Object.entries(mapping.names||{}),taxes=Object.entries(mapping.taxIds||{});
+            if(!names.length&&!taxes.length)message('אין שיוכי ספקים שמורים להצגה.');
+            for(const [name,supplier] of names)message('שם שנקרא: '+name+' ← ספק: '+supplier);
+            for(const [id,supplier] of taxes) {
+                const row=message('מזהה: '+id+' ← ספק: '+supplier);
+                if(id===OWN_BUSINESS_TAX_ID) {row.style.color='#b42318';row.textContent+=' · זה הח״פ שלך. השיוך הישן מוצג לבדיקה בלבד ואינו משמש לזיהוי ספק בהוצאות או בתעודות משלוח. לא נמחק דבר.';}
+            }
+            section('דוגמאות שמורות לסוג מסמך ולתאריך');
+            if(!entries.some(e=>!e.disabled))message('אין דוגמאות פעילות שמורות לסוג מסמך או לתאריך. שיוכי ספקים, אם נשמרו, מופיעים בחלק שמעל.');
             for(const e of entries.filter(e=>!e.disabled)) {
                 const row=document.createElement('p');row.style.cssText='white-space:pre-line;overflow-wrap:anywhere;line-height:1.6;';row.textContent=(e.scope?.title||'')+' | מזהי מנפיק: '+(e.scope?.issuer||[]).join(', ')+'\n'+(e.corrections||[]).map(c=>(c.field==='invoiceDate'?'תאריך':'סוג מסמך')+': נקרא '+(isValidIsoDate(c.before)?fmtIsoDate(c.before):({invoice:'חשבונית',delivery_note:'תעודת משלוח'}[c.before]||c.before))+'; תוקן ל-'+(isValidIsoDate(c.after)?fmtIsoDate(c.after):({invoice:'חשבונית',delivery_note:'תעודת משלוח'}[c.after]||c.after))).join('\n')+'\nמקור: '+(e.sourceDisplay ? [e.sourceDisplay.kind,e.sourceDisplay.number,isValidIsoDate(e.sourceDisplay.date)?fmtIsoDate(e.sourceDisplay.date):'',e.sourceDisplay.source].filter(Boolean).join(' | ') : 'מסמך שנשמר קודם');
                 const del=document.createElement('button');del.textContent='הפסק להשתמש בתיקון';del.onclick=async()=>{del.disabled=true;try{await window.removeRecognitionExample(e.id);row.remove();}catch(err){del.disabled=false;showToast('לא ניתן להסיר את התיקון כרגע','err');}};row.append(del);box.append(row);
@@ -1721,7 +1782,7 @@
             const supplierEl = document.getElementById('invoiceSupplierSelect');
             const supplier = supplierEl ? supplierEl.value : '';
             if (!supplier || supplier === '__other__' || recognizedItemsList.length === 0) return;
-            const amount = parseFloat(document.getElementById('invoiceAmountInput').value);
+            const amount = readInvoiceAmount();
             if (amount < 0) return; // זיכוי/החזרה - לא בודקים עליית מחיר
             const date = (document.getElementById('invoiceDateInput').value || '').trim();
 
@@ -1805,7 +1866,7 @@
                     try { await ackOrQueue(setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }), 8000, "רשימת ספקים"); } catch(e){ console.warn("שמירת רשימת ספקים נכשלה:", e); showToast("⚠️ שמירת רשימת הספקים נכשלה - נסה שוב.", "err"); }
                 }
             }
-            const supplierFeedback = {rawName:lastRecognizedSupplierRaw,rawTax:lastRecognizedTaxId,role:'delivery',taxConfirmed:Boolean(document.getElementById('confirmSupplierTaxLearning')?.checked),confirmed:supplier !== initialSupplierSelection};
+            const supplierFeedback = {rawName:lastRecognizedSupplierRaw,rawTax:lastRecognizedTaxId,role:'delivery',taxConfirmed:Boolean(document.getElementById('confirmSupplierTaxLearning')?.checked),eligibleIds:confirmedIssuerCandidates.slice(),confirmed:supplier !== initialSupplierSelection || Boolean(document.getElementById('confirmSupplierTaxLearning')?.checked)};
             const learningRawAtSave=document.getElementById('confirmSupplierTaxLearning')?.checked ? correctionRawSnapshot : null;
             const learningTypeChanged=document.getElementById('docTypeSelect')?.value !== initialTypeSelection;
             const learningDateChanged=document.getElementById('invoiceDateInput').value !== initialDateSelection;
@@ -1816,7 +1877,8 @@
             const notes = document.getElementById('invoiceNotesInput').value.trim();
             const items = recognizedItemsList;
 
-            let amount = parseFloat(document.getElementById('invoiceAmountInput').value);
+            let amount = readInvoiceAmount();
+            if (!Number.isFinite(amount) && document.getElementById('invoiceAmountInput').value.trim()) return warnInvalidInvoiceAmount();
             if (isNaN(amount)) {
                 const sum = items.reduce((t, it) => t + (Number(it.price) || 0), 0);
                 amount = sum > 0 ? round2(sum) : 0;
@@ -2416,7 +2478,7 @@
 
                 // סכום: מתעדכן רק אם המשתמש לא שינה אותו ידנית
                 const amountInput = document.getElementById('invoiceAmountInput');
-                if (typeof merged.amount === 'number' && (amountInput.value === '' || Number(amountInput.value) === lastAutoAmount)) {
+                if (typeof merged.amount === 'number' && (amountInput.value === '' || parseInvoiceAmountValue(amountInput.value) === lastAutoAmount)) {
                     amountInput.value = merged.amount;
                     lastAutoAmount = merged.amount;
                 }
@@ -3174,7 +3236,7 @@
                 initialDateSelection=d.state.initialDateSelection;
                 initialTypeSelection=d.state.initialTypeSelection;
                 // Rebuild controls for this document, without supplier prompts or duplicate alerts.
-                const recognized={...correctionRawSnapshot,supplier:d.values.invoiceSupplierSelect,invoiceNumber:d.values.invoiceNumberInput,invoiceDate:d.values.invoiceDateInput,amount:Number(d.values.invoiceAmountInput),items:recognizedItemsList,charges:recognizedChargesList,taxIds:recognizedTaxIds,subtotalBeforeVat:recognizedSubtotalBeforeVat,vatAmount:recognizedVatAmount,handwrittenNotes:handwrittenNotesList};
+                const recognized={...correctionRawSnapshot,supplier:d.values.invoiceSupplierSelect,invoiceNumber:d.values.invoiceNumberInput,invoiceDate:d.values.invoiceDateInput,amount:parseInvoiceAmountValue(d.values.invoiceAmountInput),items:recognizedItemsList,charges:recognizedChargesList,taxIds:recognizedTaxIds,subtotalBeforeVat:recognizedSubtotalBeforeVat,vatAmount:recognizedVatAmount,handwrittenNotes:handwrittenNotesList};
                 const existing=editingInvoiceId?{...editCropInvoice,...recognized,id:editingInvoiceId,docType:scanMode==='delivery'?'delivery_note':scanMode}:null;
                 openInvoiceConfirmForm(recognized,existing,false);
                 scanMode=d.state.scanMode;
@@ -3766,7 +3828,7 @@
                 ? (splitScanState ? pendingInboxItem.id + '__' + splitDocKey(splitScanState.groups[splitScanState.idx], splitScanState.results) : pendingInboxItem.id)
                 : null;
             correctionRawSnapshot = recognized ? JSON.parse(JSON.stringify(recognized)) : null;
-            confirmedIssuerCandidates=globalThis.InvoiceLearning?InvoiceLearning.ids(recognized):[];
+            confirmedIssuerCandidates=scanMode==='income'?[]:supplierCandidateIds(recognized);
             const confirmForm = document.getElementById('invoiceConfirmForm');
             if(!splitScanState)document.getElementById('splitReviewNav')?.setAttribute('hidden','');
             const imgWrap = document.getElementById('invoicePreviewImgWrap');
@@ -4097,15 +4159,15 @@
                     try { await ackOrQueue(setDoc(getSettingsDoc("suppliers_list"), { suppliers: suppliersList }), 8000, "רשימת ספקים"); } catch(e){ console.warn("שמירת רשימת ספקים נכשלה:", e); showToast("⚠️ שמירת רשימת הספקים נכשלה - נסה שוב.", "err"); }
                 }
             }
-            const supplierFeedback = {rawName:lastRecognizedSupplierRaw,rawTax:lastRecognizedTaxId,role:isIncome?'income':'invoice',taxConfirmed:Boolean(document.getElementById('confirmSupplierTaxLearning')?.checked),confirmed:supplier !== initialSupplierSelection};
+            const supplierFeedback = {rawName:lastRecognizedSupplierRaw,rawTax:lastRecognizedTaxId,role:isIncome?'income':'invoice',taxConfirmed:Boolean(document.getElementById('confirmSupplierTaxLearning')?.checked),eligibleIds:confirmedIssuerCandidates.slice(),confirmed:supplier !== initialSupplierSelection || Boolean(document.getElementById('confirmSupplierTaxLearning')?.checked)};
             const learningRawAtSave=document.getElementById('confirmSupplierTaxLearning')?.checked ? correctionRawSnapshot : null;
             const learningTypeChanged=document.getElementById('docTypeSelect')?.value !== initialTypeSelection;
             const learningDateChanged=document.getElementById('invoiceDateInput').value !== initialDateSelection;
             const scanMetaAtSave = currentScanMeta ? {...currentScanMeta,userChanged:document.getElementById('invoiceDateInput').value !== initialDateSelection} : null;
 
             const invoiceNumber = document.getElementById('invoiceNumberInput').value.trim();
-            const amount = parseFloat(document.getElementById('invoiceAmountInput').value);
-            if (isNaN(amount) || amount === 0) { alert("אנא הכנס סכום תקין (אפשר סכום שלילי לזיכוי, אך לא 0)."); return; }
+            const amount = readInvoiceAmount();
+            if (!Number.isFinite(amount) || amount === 0) return warnInvalidInvoiceAmount();
             const paymentMethod = document.getElementById('invoicePaymentMethodInput').value.trim();
             let notes = document.getElementById('invoiceNotesInput').value.trim();
             if (notes === 'חשבונית זיכוי') notes = '';
